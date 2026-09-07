@@ -1,0 +1,22 @@
+.DS_Store
+
+# Generated userscript bundles
+dist/
+
+# Local dependencies and logs
+node_modules/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Local environment and secret configuration
+.env
+.env.*
+!.env.example
+env.ini
+
+# Local editor and tooling files
+.idea/
+.vscode/
+.playwright-cli/

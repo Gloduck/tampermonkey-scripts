@@ -1,0 +1,9 @@
+{
+  "name": "tampermonkey-scripts",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "check": "npm run build && node scripts/check.mjs"
+  }
+}
