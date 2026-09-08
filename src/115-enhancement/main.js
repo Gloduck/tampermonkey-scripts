@@ -100,6 +100,7 @@
         mobile: { key: "tm115-mobile-enabled", label: "手机 / 平板网页适配" },
         list: { key: "tm115-list-enabled", label: "列表优化" },
         player: { key: "tm115-player-enabled", label: "播放器优化" },
+        subtitleScale: { key: "tm115-subtitle-scale-enabled", label: "字幕随播放器缩放（需开启播放器优化）", defaultValue: true },
         playlist: { key: "tm115-playlist-enabled", label: "播放器显示视频列表" },
         ads: { key: "tm115-ads-enabled", label: "去除广告" },
         download: { key: "tm115-download-enabled", label: "大文件浏览器下载", defaultValue: true },
@@ -251,6 +252,24 @@
             .tm115-player.tm115-legacy .vfs-name { max-width: 35%; overflow: hidden; }
         }
         ` : "";
+        if (values.player && values.subtitleScale) {
+            const caption = '.tm115-player:not(.tm115-legacy) > .absolute.left-0.right-0.pointer-events-none';
+            style.textContent += `
+            .tm115-player.tm115-legacy [rel="subtitle_show"] > p {
+                transform: scale(var(--tm115-subtitle-scale, 1)); transform-origin: center bottom;
+                width: calc(100% / var(--tm115-subtitle-scale, 1)); max-width: none;
+                margin-inline: calc((100% - 100% / var(--tm115-subtitle-scale, 1)) / 2);
+                box-sizing: border-box; overflow-wrap: anywhere;
+            }
+            ${caption} > .whitespace-pre-line {
+                transform: scale(var(--tm115-subtitle-scale, 1)); transform-origin: center bottom;
+                min-width: 0; flex-shrink: 0; max-width: calc(80% / var(--tm115-subtitle-scale, 1)) !important;
+                box-sizing: border-box; overflow-wrap: anywhere;
+            }
+            ${caption}.top-16 > .whitespace-pre-line { transform-origin: center top; }
+            ${caption}[class~="top-1/2"] > .whitespace-pre-line { transform-origin: center; }
+            `;
+        }
         if (values.ads) {
             style.textContent += `
             ${promoImages}, ${popupSelector}, .te115-ad-hidden,
@@ -1317,6 +1336,20 @@
         window.addEventListener("pageshow", () => { pageActive = true; sync(); });
         return { sync };
     }
+    function initSubtitleScaling(root, legacy) {
+        if (!values.subtitleScale) return null;
+        // 以 960x540 为统一基准；旧版由 video-player 定义画面尺寸，内部舞台为绝对定位。
+        const viewport = legacy ? root.closest(".video-player") || root : root;
+        const resize = new ResizeObserver(([entry]) => {
+            const { width, height } = entry.contentRect;
+            if (!root.isConnected || !width || !height) return;
+            const scale = String(Math.min(width / 960, height / 540));
+            if (root.style.getPropertyValue("--tm115-subtitle-scale") !== scale) root.style.setProperty("--tm115-subtitle-scale", scale);
+        });
+        resize.observe(viewport);
+        return resize;
+    }
+
     function enhancePlayer(video, root, legacy) {
         const abort = new AbortController();
         const listen = (target, type, callback, options = {}) => {
@@ -1341,6 +1374,9 @@
             }
         });
         fullscreenObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
+
+        // 新旧版共用；只受播放器优化和字幕缩放开关控制，与移动网页适配无关。
+        const subtitleResize = initSubtitleScaling(root, legacy);
 
         if (legacy && isMobileContext() && window === window.top) {
             // 旧版缺少合适的 viewport，页面缩放和视频像素尺寸会脱节。
@@ -1803,6 +1839,8 @@
                 clearTimeout(lockTimer);
                 clearTimeout(tapTimer);
                 fullscreenObserver.disconnect();
+                subtitleResize?.disconnect();
+                root.style.removeProperty("--tm115-subtitle-scale");
                 controlsObserver?.disconnect();
                 brightnessObserver?.disconnect();
                 if (brightnessFilter && video.style.getPropertyValue("filter") === brightnessFilter.applied) {
