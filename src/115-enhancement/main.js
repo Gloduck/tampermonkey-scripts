@@ -32,12 +32,12 @@
         return /Android|iPhone|iPad|iPod/i.test(ua);
     }
 
-    const mobileEnabled = isMobileDevice() && getValue("tm115-mobile-enabled", true);
+    const mobileWebAdaptationEnabled = isMobileDevice() && getValue("tm115-mobile-web-adaptation-enabled", true);
     const MOBILE_HOME = "https://115.com/storage/allfiles";
     const MOBILE_LOGIN = "https://aq.115.com/index/login";
 
     function isMobileContext() {
-        return mobileEnabled && isMobileDevice();
+        return mobileWebAdaptationEnabled && isMobileDevice();
     }
 
     function isMobileDashboard() {
@@ -96,14 +96,14 @@
     // <include:../shared/settings-dialog.js>
 
     // 功能开关与播放参数分别保存，设置窗口只修改发生变化的项目。
-    const config = {
-        mobile: { group: "网页适配", key: "tm115-mobile-enabled", label: "手机 / 平板网页适配" },
-        player: { group: "播放器", key: "tm115-player-enabled", label: "播放器功能优化" },
-        playlist: { group: "播放器", key: "tm115-playlist-enabled", label: "播放器页面显示视频列表" },
-        subtitleScale: { group: "播放器", key: "tm115-subtitle-scale-enabled", label: "字幕随播放器缩放（需开启播放器优化）", defaultValue: true },
-        holdRate: {
+    const settingDefinitions = {
+        adaptMobileWeb: { group: "网页适配", key: "tm115-mobile-web-adaptation-enabled", label: "手机 / 平板网页适配" },
+        enhancePlayer: { group: "播放器", key: "tm115-player-enhancement-enabled", label: "播放器功能优化" },
+        showPlayerVideoList: { group: "播放器", key: "tm115-player-video-list-enabled", label: "播放器页面显示视频列表" },
+        scaleSubtitlesWithPlayer: { group: "播放器", key: "tm115-subtitle-player-scaling-enabled", label: "字幕随播放器缩放（需开启播放器优化）", defaultValue: true },
+        longPressPlaybackRate: {
             group: "播放器",
-            key: "tm115-hold-rate",
+            key: "tm115-long-press-playback-rate",
             label: "长按快进倍数（1-8 倍，需开启播放器优化）",
             type: "number",
             defaultValue: 3,
@@ -115,9 +115,9 @@
             },
             serializeValue: value => +value,
         },
-        download: { group: "其他功能", key: "tm115-download-enabled", label: "下载按钮替换（支持大文件）", defaultValue: true },
-        list: { group: "其他功能", key: "tm115-list-enabled", label: "合并列表悬浮按钮" },
-        ads: { group: "其他功能", key: "tm115-ads-enabled", label: "去除广告" },
+        replaceDownloadButtons: { group: "其他功能", key: "tm115-download-button-replacement-enabled", label: "下载按钮替换（支持大文件）", defaultValue: true },
+        mergeFileHoverActions: { group: "其他功能", key: "tm115-file-hover-actions-merge-enabled", label: "合并列表悬浮按钮" },
+        removeAds: { group: "其他功能", key: "tm115-ad-removal-enabled", label: "去除广告" },
     };
     function setValue(key, value) {
         if (typeof GM_setValue === "function") GM_setValue(key, value);
@@ -125,7 +125,7 @@
 
     // 数值参数单独读取和校验，避免被当作开关转换成布尔值；异常存储值使用默认值。
     function readSettings() {
-        return Object.fromEntries(Object.entries(config).map(([name, item]) => {
+        return Object.fromEntries(Object.entries(settingDefinitions).map(([name, item]) => {
             const value = getValue(item.key, item.defaultValue ?? true);
             return [name, item.type === "number"
                 ? (item.validValue(value) ? item.defaultValue : +value)
@@ -138,13 +138,13 @@
         const nextValues = await SettingsDialog.open({
             title: "115 增强设置",
             values: currentValues,
-            items: Object.entries(config).map(([name, item]) => ({ name, type: "checkbox", ...item })),
+            items: Object.entries(settingDefinitions).map(([name, item]) => ({ name, type: "checkbox", ...item })),
             confirmText: "保存并刷新",
             cancelText: "取消",
         });
         if (!nextValues) return;
         let changed = false;
-        for (const [name, item] of Object.entries(config)) {
+        for (const [name, item] of Object.entries(settingDefinitions)) {
             if (nextValues[name] === currentValues[name]) continue;
             setValue(item.key, nextValues[name]);
             changed = true;
@@ -158,7 +158,7 @@
         }
     }
 
-    const values = readSettings();
+    const settings = readSettings();
     const players = new Map();
     let fullscreenOrientation;
     const promoImages = 'img[src*="/spotlight/imgload"], img[alt*="Web端右下角广告"], img[alt*="Web端头部广告"]';
@@ -169,7 +169,7 @@
     function createBaseStyle() {
         const style = document.createElement("style");
         style.id = "tm115-player-style";
-        style.textContent = values.player ? `
+        style.textContent = settings.enhancePlayer ? `
         .tm115-player { position: relative; }
         .tm115-player.tm115-legacy { height: 100% !important; }
         #js-wrap:has(.tm115-legacy), .video-container:has(.tm115-legacy), .video-player:has(.tm115-legacy) {
@@ -253,7 +253,7 @@
             .tm115-player.tm115-legacy .vfs-name { max-width: 35%; overflow: hidden; }
         }
         ` : "";
-        if (values.player && values.subtitleScale) {
+        if (settings.enhancePlayer && settings.scaleSubtitlesWithPlayer) {
             const caption = '.tm115-player:not(.tm115-legacy) > .absolute.left-0.right-0.pointer-events-none';
             style.textContent += `
             .tm115-player.tm115-legacy [rel="subtitle_show"] > p {
@@ -271,7 +271,7 @@
             ${caption}[class~="top-1/2"] > .whitespace-pre-line { transform-origin: center; }
             `;
         }
-        if (values.ads) {
+        if (settings.removeAds) {
             style.textContent += `
             ${promoImages}, ${popupSelector}, .te115-ad-hidden,
             .video-pause-banner[rel="701adv"],
@@ -282,7 +282,7 @@
             }
             `;
         }
-        if (values.list) {
+        if (settings.mergeFileHoverActions) {
             style.textContent += `
             /* 只隐藏悬浮操作，保留原节点及其事件，供右键菜单调用。 */
             :is(
@@ -294,7 +294,7 @@
             }
             `;
         }
-        if (values.playlist) {
+        if (settings.showPlayerVideoList) {
             style.textContent += `
             .tm115-playlist {
                 position: relative; box-sizing: border-box; width: 100%; min-width: 0;
@@ -775,7 +775,7 @@
     }
 
     function refreshMobile() {
-        if (!mobileEnabled) return;
+        if (!mobileWebAdaptationEnabled) return;
         const root = document.documentElement;
         const shell = isMobileDashboard() ? document.querySelector("aside.container-leftside") : null;
         const content = shell?.parentElement.querySelector(':scope > div.flex-1');
@@ -814,7 +814,7 @@
     }
 
     function refreshAds() {
-        if (!values.ads) return;
+        if (!settings.removeAds) return;
         document.querySelectorAll('button[aria-label="关闭广告"]').forEach(button => {
             const container = button.parentElement;
             if (!container?.matches('div.relative.w-full.h-full') || !container.querySelector(promoImages)) return;
@@ -838,7 +838,7 @@
     }
 
     function initListMenus() {
-        if (!values.list && !mobileEnabled) return;
+        if (!settings.mergeFileHoverActions && !mobileWebAdaptationEnabled) return;
         // 文件行的悬浮操作会遮挡邻近内容，因此把缺少的操作合并进站点原生右键菜单。
         const documents = [document];
         try { if (window.parent !== window) documents.push(window.parent.document); } catch {}
@@ -886,12 +886,12 @@
         for (const owner of documents) {
             listen(owner, 'contextmenu', event => {
                 cleanup();
-                if (!values.list && !(isMobileDashboard() && isCompactViewport())) return;
+                if (!settings.mergeFileHoverActions && !(isMobileDashboard() && isCompactViewport())) return;
                 const row = event.target.closest?.('.file-list-item, .file-grid-item, li[rel="item"][file_type]');
                 if (!row) return;
                 const augment = () => {
                     const mobile = isMobileDashboard() && isCompactViewport();
-                    if (!row.isConnected || (!values.list && !mobile)) { cleanup(); return; }
+                    if (!row.isConnected || (!settings.mergeFileHoverActions && !mobile)) { cleanup(); return; }
                     // 新版关闭对话框后，右键菜单偶尔停留在隐藏测量状态，需要补齐定位和显示。
                     for (const candidate of document.querySelectorAll('div.fixed[class~="z-[10000]"]:has(button.w-full.text-left)')) {
                         if (!mobile) break;
@@ -983,7 +983,7 @@
             // 在 window 捕获阶段处理新增项，避免外层页面先关闭菜单、导致点击丢失。
             for (const type of ['pointerdown', 'mousedown', 'click', 'keydown']) listen(owner.defaultView, type, event => {
                 if (invoking) return;
-                if (!values.list && !(isMobileDashboard() && isCompactViewport())) { cleanup(); return; }
+                if (!settings.mergeFileHoverActions && !(isMobileDashboard() && isCompactViewport())) { cleanup(); return; }
                 if (type === 'keydown') {
                     if (event.key === 'Escape') cleanup();
                     return;
@@ -1120,7 +1120,7 @@
             // 先检查整批目标，避免先下载文件、遇到文件夹后又把整批交回原生处理。
             for (const target of targets) {
                 if (cancelled) return;
-                if (!getValue("tm115-download-enabled", true)) throw new Error("下载开关已关闭，已停止后续取链");
+                if (!getValue("tm115-download-button-replacement-enabled", true)) throw new Error("下载开关已关闭，已停止后续取链");
                 const id = String(target.id || "");
                 let pickcode = target.pickcode;
                 const key = id ? `id:${id}` : `pc:${pickcode}`;
@@ -1144,12 +1144,12 @@
             const ua = navigator.userAgent;
             for (const { id, pickcode } of filesToDownload) {
                 if (cancelled) return;
-                if (!getValue("tm115-download-enabled", true)) throw new Error("下载开关已关闭，已停止后续取链");
+                if (!getValue("tm115-download-button-replacement-enabled", true)) throw new Error("下载开关已关闭，已停止后续取链");
                 const seed = crypto.getRandomValues(new Uint8Array(16));
                 const encrypted = await requestDownloadAPI("https://proapi.115.com/app/chrome/downurl",
                     new URLSearchParams({ data: downloadCodec(JSON.stringify({ pickcode }), seed) }).toString());
                 if (cancelled) return;
-                if (!getValue("tm115-download-enabled", true)) throw new Error("下载开关已关闭，已停止后续下载");
+                if (!getValue("tm115-download-button-replacement-enabled", true)) throw new Error("下载开关已关闭，已停止后续下载");
                 const files = downloadCodec(encrypted, seed, true);
                 const file = id ? files?.[id] : Object.values(files || {}).find(item => item?.pick_code === pickcode);
                 if (!file?.url?.url) throw new Error("该文件没有可用的下载地址");
@@ -1176,7 +1176,7 @@
     }
 
     function initBrowserDownloads() {
-        if (!values.download) return;
+        if (!settings.replaceDownloadButtons) return;
         const hooks = [];
         const rowSelector = '.file-list-item[data-file-id], .file-grid-item[data-file-id]';
         const menuSelector = '.context-menu, [role="menu"], div.fixed[class~="z-[10000]"]:has(button.w-full.text-left)';
@@ -1212,7 +1212,7 @@
                         nativeClick = true;
                         try { return original.call(this, files, ...args); } finally { nativeClick = false; }
                     };
-                    if (nativeClick || !getValue("tm115-download-enabled", true) || new URL(location.href).searchParams.has("share_id")) return original.call(this, files, ...args);
+                    if (nativeClick || !getValue("tm115-download-button-replacement-enabled", true) || new URL(location.href).searchParams.has("share_id")) return original.call(this, files, ...args);
                     const rows = name === "DownloadSomeFile" ? Array.from(files || [], item => item?.nodeType === 1 ? item : item?.[0]) : [];
                     if (name === "DownloadSomeFile" && (!rows.length || rows.some(row => row?.getAttribute("file_type") !== "1"))) return fallback();
                     const targets = name === "Download" ? [{ pickcode: files }] : rows.map(row => ({ id: row.getAttribute("file_id") }));
@@ -1244,7 +1244,7 @@
         document.addEventListener("pointerdown", remember, true);
         window.addEventListener("click", event => {
             hookLegacy();
-            if (nativeClick || !getValue("tm115-download-enabled", true) || location.hostname !== "115.com" ||
+            if (nativeClick || !getValue("tm115-download-button-replacement-enabled", true) || location.hostname !== "115.com" ||
                 !/^\/(storage|search|players\/video)(\/|$)/.test(location.pathname) || new URL(location.href).searchParams.has("share_id")) return;
             const button = event.target.closest?.('button, a, [role="menuitem"]');
             const action = event.target.closest?.('[data-menu-action="download"]');
@@ -1292,7 +1292,7 @@
 
     function initFullscreenOrientation() {
         const orientation = screen.orientation;
-        if (!values.player || !isMobileContext() || typeof orientation?.lock !== "function" || typeof orientation.unlock !== "function") return null;
+        if (!settings.enhancePlayer || !isMobileContext() || typeof orientation?.lock !== "function" || typeof orientation.unlock !== "function") return null;
         let activeVideo = null;
         let nativeVideo = null;
         let ownsLock = false;
@@ -1338,7 +1338,7 @@
         return { sync };
     }
     function initSubtitleScaling(root, legacy) {
-        if (!values.subtitleScale) return null;
+        if (!settings.scaleSubtitlesWithPlayer) return null;
         // 以 960x540 为统一基准；旧版由 video-player 定义画面尺寸，内部舞台为绝对定位。
         const viewport = legacy ? root.closest(".video-player") || root : root;
         const resize = new ResizeObserver(([entry]) => {
@@ -1502,7 +1502,7 @@
         listen(root, "keydown", revealLock);
         revealLock();
 
-        // 新版移动 UA：单击显隐，双击播放。只受播放器优化开关控制，与 mobileEnabled 无关。
+        // 新版移动 UA：单击显隐，双击播放。只受播放器优化开关控制，与移动网页适配无关。
         if (!legacy) {
             let pressed;
             const surface = event => event.target === video || event.target === root;
@@ -1738,7 +1738,7 @@
                 current.mode = "hold";
                 current.rate = video.playbackRate;
                 // 使用配置倍数，但不把当前已经更快的播放速度降下来。
-                current.boostRate = Math.max(values.holdRate, current.rate);
+                current.boostRate = Math.max(settings.longPressPlaybackRate, current.rate);
                 video.playbackRate = current.boostRate;
                 show(`长按 ${video.playbackRate} 倍速`);
             }, 450);
@@ -1866,7 +1866,7 @@
     }
 
     function refreshPlayers() {
-        if (!values.player) return;
+        if (!settings.enhancePlayer) return;
         for (const [video, player] of players) {
             if (!video.isConnected || !player.root.contains(video)) {
                 player.destroy();
@@ -2073,7 +2073,7 @@
 
     // 播放器替换或地址变化时销毁旧列表，避免旧视频的按钮残留在新播放器下方。
     function refreshPlaylists() {
-        if (!values.playlist) return;
+        if (!settings.showPlayerVideoList) return;
         const url = new URL(location.href);
         const modernCode = url.pathname.match(/^\/players\/video\/([a-z0-9]+)\/?$/i)?.[1];
         const pickcode = modernCode || url.searchParams.get("pickcode");
@@ -2124,7 +2124,7 @@
         }).observe(document.documentElement, {
             childList: true, subtree: true,
             // 只响应站点覆盖适配标记；忽略 hover、选中和脚本自己的 class 写入。
-            ...(mobileEnabled ? { attributes: true, attributeFilter: ["class", "style"], attributeOldValue: true } : {}),
+            ...(mobileWebAdaptationEnabled ? { attributes: true, attributeFilter: ["class", "style"], attributeOldValue: true } : {}),
         });
         window.addEventListener("popstate", refresh);
     }
