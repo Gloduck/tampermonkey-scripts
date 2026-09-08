@@ -76,8 +76,11 @@ const SettingsDialog = {
         applyCommonAttributes(input);
         if (item.type === "checkbox") {
             input.className = "";
-            input.style.cssText = "width: auto; margin: 0;";
+            input.style.cssText = "flex-shrink: 0; width: auto; margin: 0;";
             input.checked = Boolean(fieldValue);
+            label.style.cssText = "display: inline-flex; align-items: center; gap: 6px; color: #334155;";
+            label.prepend(input);
+            return field;
         } else if (fieldValue != null) {
             input.value = fieldValue;
         }
