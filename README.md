@@ -7,24 +7,9 @@
 ```text
 src/
 ├── shared/
-│   ├── dialog.js
-│   └── settings-dialog.js
-├── cookie-manager/
-│   ├── main.js
-│   └── userscript.json
-├── 115-cookie-login/
-│   ├── main.js
-│   └── userscript.json
-├── forum-list-images/
-│   ├── main.js
-│   └── userscript.json
-├── job-assistant/
-│   ├── main.js
-│   └── userscript.json
-├── vikacg-enhancement/
-│   ├── main.js
-│   └── userscript.json
-└── opencode-extension/
+│   ├── global.js
+│   └── common.js
+└── user-script/
     ├── main.js
     └── userscript.json
 
@@ -32,12 +17,8 @@ scripts/
 └── build.mjs
 
 dist/
-├── 115 Cookie登录.user.js
-├── Cookie管理器.user.js
-├── 论坛列表显示图片.user.js
-├── 求职助手.user.js
-├── Vikacg增强脚本.user.js
-└── OpenCode扩展.user.js
+├── user-script.user.js
+└── custom-script.user.js
 ```
 
 ## 构建
