@@ -174,8 +174,15 @@
             width: 100% !important; height: 100% !important;
             max-width: none !important; max-height: none !important;
             min-width: 0 !important; min-height: 0 !important;
-            margin: 0 !important;
+            margin: 0 !important; touch-action: pinch-zoom;
         }
+        .tm115-player .tm115-gesture-feedback {
+            position: absolute; top: 20px; left: 50%; transform: translateX(-50%);
+            z-index: 100; max-width: calc(100% - 24px); padding: 8px 12px;
+            border-radius: 6px; background: #000b; color: #fff; font: 14px/1.4 sans-serif;
+            text-align: center; pointer-events: none;
+        }
+        .tm115-player .tm115-gesture-feedback[hidden] { display: none !important; }
         .tm115-player.tm115-legacy video {
             width: var(--tm115-scale, 100%) !important; height: var(--tm115-scale, 100%) !important;
             margin: auto !important; object-fit: contain !important;
@@ -1082,11 +1089,15 @@
 
         let hideTimer;
         let prompt;
+        let feedback;
+        let brightness = 1;
+        let brightnessFilter;
+        let brightnessObserver;
         const zoomButtons = legacy ? [...root.querySelectorAll('[btn="zoom"]')].map(button => [button, button.classList.contains("current")]) : [];
         let gesture;
         let suppressClickUntil = 0;
         let tapTimer;
-        const interactive = 'a, button, input, select, textarea, summary, [role="button"], [role="slider"], [contenteditable="true"], .operate-bar, .video-dialog-box, .video-full-screen, .bar-progress';
+        const interactive = 'a, button, input, select, textarea, summary, [role="button"], [role="slider"], [contenteditable="true"], .tm115-native-controls, [class~="group/progress"], .operate-bar, .video-dialog-box, .video-full-screen, .bar-progress';
         // 锁定只阻止播放器交互，不暂停视频；解锁按钮始终保留可操作状态。
         let locked = false;
         let lockTimer;
@@ -1244,7 +1255,18 @@
 
         function show(text, timeout = 0) {
             clearTimeout(hideTimer);
-            if (!legacy) return;
+            if (!legacy) {
+                if (!feedback) {
+                    feedback = document.createElement("div");
+                    feedback.className = "tm115-gesture-feedback";
+                    feedback.setAttribute("role", "status");
+                    root.append(feedback);
+                }
+                feedback.textContent = text;
+                feedback.hidden = false;
+                if (timeout) hideTimer = setTimeout(restorePrompt, timeout);
+                return;
+            }
             if (!prompt) {
                 const element = root.querySelector('[rel="next_tips"].video-prompt');
                 if (!element) return;
@@ -1265,10 +1287,11 @@
 
         function restorePrompt() {
             clearTimeout(hideTimer);
+            if (feedback) feedback.hidden = true;
             if (!prompt) return;
-            const { element, node, text, feedback, display, priority, hadStyle } = prompt;
+            const { element, node, text, feedback: shownText, display, priority, hadStyle } = prompt;
             // 只还原仍由脚本控制的内容，不覆盖原生播放器后来写入的提示或样式。
-            if (node.data === feedback) node.data = text;
+            if (node.data === shownText) node.data = text;
             if (element.style.getPropertyValue("display") === "block" && !element.style.getPropertyPriority("display")) {
                 if (display) element.style.setProperty("display", display, priority);
                 else element.style.removeProperty("display");
@@ -1328,12 +1351,70 @@
             return nearest;
         }
 
+        function setBrightness(value) {
+            // 叠加画面亮度，不替换原生对比度/饱和度；站点改滤镜时以新值为基底。
+            const filter = video.style.getPropertyValue("filter");
+            if (!brightnessFilter || filter !== brightnessFilter.applied) {
+                brightnessFilter = {
+                    value: filter, priority: video.style.getPropertyPriority("filter"),
+                    base: getComputedStyle(video).filter,
+                };
+            }
+            brightness = value;
+            video.style.setProperty("filter", `${brightnessFilter.base === "none" ? "" : brightnessFilter.base} brightness(${value})`.trim(), "important");
+            brightnessFilter.applied = video.style.getPropertyValue("filter");
+            if (!brightnessObserver) {
+                brightnessObserver = new MutationObserver(() => {
+                    if (video.style.getPropertyValue("filter") !== brightnessFilter.applied) setBrightness(brightness);
+                });
+                brightnessObserver.observe(video, { attributes: true, attributeFilter: ["style"] });
+            }
+        }
+
+        // 触摸和鼠标共用方向判定；锁定方向后不再切换，纵向功能按起手所在半区决定。
+        function moveGesture(x, y) {
+            const current = gesture;
+            const dx = x - current.x;
+            const dy = y - current.y;
+            if (current.mode === "pending" && Math.hypot(dx, dy) > 12) {
+                clearTimeout(current.timer);
+                if (Math.abs(dx) > Math.abs(dy) * 1.2) {
+                    if (seekTarget(current.start) === null) { finish(); return false; }
+                    current.mode = "seek";
+                } else if (Math.abs(dy) > Math.abs(dx) * 1.2) {
+                    current.mode = current.left ? "brightness" : "volume";
+                    current.level = current.left ? brightness : video.muted ? 0 : video.volume;
+                }
+            }
+            if (current.mode === "seek") {
+                current.target = seekTarget(current.start + Math.round(dx / current.width * 120));
+                if (current.target === null) { finish(); return false; }
+                const delta = Math.round(current.target - current.start);
+                show(`${delta >= 0 ? "+" : ""}${delta} 秒  ${time(current.target)} / ${time(video.duration)}`);
+            } else if (current.mode === "brightness") {
+                setBrightness(Math.max(0.2, Math.min(1, current.level - dy / current.height)));
+                show(`画面亮度 ${Math.round(brightness * 100)}%`, 1000);
+            } else if (current.mode === "volume") {
+                const volume = Math.max(0, Math.min(1, current.level - dy / current.height));
+                try {
+                    video.volume = volume;
+                    // 部分移动浏览器会忽略 volume 写入，不显示虚假的调整结果或意外解除静音。
+                    if (Math.abs(video.volume - volume) > 0.01) throw new Error("Volume unavailable");
+                    video.muted = volume === 0;
+                    show(`音量 ${Math.round(video.volume * 100)}%`, 1000);
+                } catch { show("浏览器限制音量调节，请使用设备音量键", 1200); }
+            }
+            return current.mode !== "pending";
+        }
+
         // 统一结束触摸/鼠标手势：恢复临时倍速，并按需提交预览中的跳转位置。
         function finish(commit = false) {
             if (!gesture) return;
             const current = gesture;
             gesture = null;
             clearTimeout(current.timer);
+            if (current.mode !== "pending") suppressClickUntil = Date.now() + 700;
+            if (current.mode === "brightness" || current.mode === "volume") restorePrompt();
             if (current.mode === "hold") {
                 if (video.playbackRate === current.boostRate) video.playbackRate = current.rate;
                 show(`已恢复 ${video.playbackRate} 倍速`, 800);
@@ -1351,7 +1432,6 @@
                     restorePrompt();
                 }
             }
-            if (current.mode === "seek" || current.mode === "hold") suppressClickUntil = Date.now() + 700;
         }
 
         // 长按只在播放状态下临时提速，松开后由 finish 恢复原速度。
@@ -1376,11 +1456,12 @@
             if (isOutsideGestureArea(point.clientX, point.clientY, rect)) return;
             finish();
             gesture = {
-                id: point.identifier, x: point.clientX, y: point.clientY, width: rect.width,
+                id: point.identifier, x: point.clientX, y: point.clientY, width: rect.width, height: Math.max(1, rect.height),
+                left: point.clientX < rect.left + rect.width / 2,
                 start: video.currentTime, target: video.currentTime, mode: "pending", rate: video.playbackRate
             };
             armHold(gesture);
-            // 起手时不阻止默认行为，保留单击和双指缩放；确认横向拖动后才接管。
+            // 起手时不阻止默认行为，保留单击和双指缩放；确认拖动方向后才接管。
             event.stopPropagation();
         }, { capture: true, passive: true });
 
@@ -1390,23 +1471,7 @@
             if (event.touches.length !== 1) { finish(); return; }
             const point = [...event.touches].find(touch => touch.identifier === gesture.id);
             if (!point) { finish(); return; }
-            const dx = point.clientX - gesture.x;
-            const dy = point.clientY - gesture.y;
-            if (gesture.mode === "pending" && Math.hypot(dx, dy) > 12) {
-                clearTimeout(gesture.timer);
-                if (Math.abs(dx) <= Math.abs(dy) * 1.2 || seekTarget(gesture.start) === null) {
-                    finish();
-                    return;
-                }
-                gesture.mode = "seek";
-            }
-            if (gesture.mode === "seek") {
-                gesture.target = seekTarget(gesture.start + Math.round(dx / gesture.width * 120));
-                if (gesture.target === null) { finish(); return; }
-                const delta = Math.round(gesture.target - gesture.start);
-                show(`${delta >= 0 ? "+" : ""}${delta} 秒  ${time(gesture.target)} / ${time(video.duration)}`);
-            }
-            if (gesture.mode !== "pending") {
+            if (moveGesture(point.clientX, point.clientY)) {
                 if (event.cancelable) event.preventDefault();
                 event.stopImmediatePropagation();
             }
@@ -1429,7 +1494,8 @@
             if (isOutsideGestureArea(event.clientX, event.clientY, rect)) return;
             finish();
             const current = gesture = {
-                mode: "pending", mouse: true, x: event.clientX, y: event.clientY, width: rect.width,
+                mode: "pending", mouse: true, x: event.clientX, y: event.clientY, width: rect.width, height: Math.max(1, rect.height),
+                left: event.clientX < rect.left + rect.width / 2,
                 start: video.currentTime, target: video.currentTime
             };
             armHold(current);
@@ -1437,24 +1503,7 @@
         listen(window, "mousemove", event => {
             if (!gesture?.mouse) return;
             if (!(event.buttons & 1)) { finish(); return; }
-            const current = gesture;
-            const dx = event.clientX - current.x;
-            const dy = event.clientY - current.y;
-            if (current.mode === "pending" && Math.hypot(dx, dy) > 12) {
-                clearTimeout(current.timer);
-                if (Math.abs(dx) <= Math.abs(dy) * 1.2 || seekTarget(current.start) === null) {
-                    finish();
-                    return;
-                }
-                current.mode = "seek";
-            }
-            if (current.mode === "seek") {
-                current.target = seekTarget(current.start + Math.round(dx / current.width * 120));
-                if (current.target === null) { finish(); return; }
-                const delta = Math.round(current.target - current.start);
-                show(`${delta >= 0 ? "+" : ""}${delta} 秒  ${time(current.target)} / ${time(video.duration)}`);
-            }
-            if (current.mode !== "pending") {
+            if (moveGesture(event.clientX, event.clientY)) {
                 if (event.cancelable) event.preventDefault();
                 event.stopImmediatePropagation();
             }
@@ -1495,9 +1544,15 @@
                 clearTimeout(tapTimer);
                 fullscreenObserver.disconnect();
                 controlsObserver?.disconnect();
+                brightnessObserver?.disconnect();
+                if (brightnessFilter && video.style.getPropertyValue("filter") === brightnessFilter.applied) {
+                    if (brightnessFilter.value) video.style.setProperty("filter", brightnessFilter.value, brightnessFilter.priority);
+                    else video.style.removeProperty("filter");
+                }
                 for (const node of nativeControls) node.classList.remove("tm115-native-controls");
                 lockButton.remove();
                 restorePrompt();
+                feedback?.remove();
                 abort.abort();
                 for (const [button, current] of zoomButtons) button.classList.toggle("current", current);
                 root.classList.remove("tm115-player", "tm115-player-mobile", "tm115-legacy", "tm115-cover", "tm115-locked", "tm115-controls-hidden");
