@@ -97,16 +97,14 @@
 
     // 功能开关与播放参数分别保存，设置窗口只修改发生变化的项目。
     const config = {
-        mobile: { key: "tm115-mobile-enabled", label: "手机 / 平板网页适配" },
-        list: { key: "tm115-list-enabled", label: "列表优化" },
-        player: { key: "tm115-player-enabled", label: "播放器优化" },
-        subtitleScale: { key: "tm115-subtitle-scale-enabled", label: "字幕随播放器缩放（需开启播放器优化）", defaultValue: true },
-        playlist: { key: "tm115-playlist-enabled", label: "播放器显示视频列表" },
-        ads: { key: "tm115-ads-enabled", label: "去除广告" },
-        download: { key: "tm115-download-enabled", label: "大文件浏览器下载", defaultValue: true },
+        mobile: { group: "网页适配", key: "tm115-mobile-enabled", label: "手机 / 平板网页适配" },
+        player: { group: "播放器", key: "tm115-player-enabled", label: "播放器功能优化" },
+        playlist: { group: "播放器", key: "tm115-playlist-enabled", label: "播放器页面显示视频列表" },
+        subtitleScale: { group: "播放器", key: "tm115-subtitle-scale-enabled", label: "字幕随播放器缩放（需开启播放器优化）", defaultValue: true },
         holdRate: {
+            group: "播放器",
             key: "tm115-hold-rate",
-            label: "长按快进倍数（1-8 倍）",
+            label: "长按快进倍数（1-8 倍，需开启播放器优化）",
             type: "number",
             defaultValue: 3,
             attributes: { min: 1, max: 8, step: 0.25 },
@@ -117,6 +115,9 @@
             },
             serializeValue: value => +value,
         },
+        download: { group: "其他功能", key: "tm115-download-enabled", label: "下载按钮替换（支持大文件）", defaultValue: true },
+        list: { group: "其他功能", key: "tm115-list-enabled", label: "合并列表悬浮按钮" },
+        ads: { group: "其他功能", key: "tm115-ads-enabled", label: "去除广告" },
     };
     function setValue(key, value) {
         if (typeof GM_setValue === "function") GM_setValue(key, value);
