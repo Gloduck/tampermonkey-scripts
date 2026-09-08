@@ -1,16 +1,17 @@
 // ==UserScript==
 // @name         115 增强
-// @namespace    tampermonkey-scripts/115-enhancement
-// @version      1.2.1
-// @description  优化115文件列表和播放器，提供视频选集按钮与广告清理，支持独立菜单设置。
+// @namespace    115-enhancement
+// @version      1.2.2
+// @description  提供一些115的优化增强项
 // @match        *://115.com/*
 // @match        *://*.115.com/*
 // @match        *://115vod.com/*
 // @match        *://www.115vod.com/*
-// @run-at       document-end
+// @run-at       document-start
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
+// @grant        unsafeWindow
 // @license      MIT
 // ==/UserScript==
 
@@ -18,7 +19,70 @@
     "use strict";
 
     if (!/(^|\.)115(?:vod)?\.com$/.test(location.hostname)) return;
-    if (!document.body) {
+    function getValue(key, fallback) {
+        return typeof GM_getValue === "function" ? GM_getValue(key, fallback) : fallback;
+    }
+
+    function isMobileDevice() {
+        const ua = navigator.userAgent;
+        // 桌面 UA 一律按桌面处理，包括平板的“请求桌面网站”；触摸能力和宽度不参与识别。
+        return /Android|iPhone|iPad|iPod/i.test(ua);
+    }
+
+    const mobileEnabled = isMobileDevice() && getValue("tm115-mobile-enabled", true);
+    const MOBILE_HOME = "https://115.com/storage/allfiles";
+    const MOBILE_LOGIN = "https://aq.115.com/index/login";
+
+    function isMobileContext() {
+        return mobileEnabled && isMobileDevice();
+    }
+
+    function isMobileDashboard() {
+        return isMobileContext() && window === window.top && location.hostname === "115.com" &&
+            Boolean(document.querySelector('aside.container-leftside'));
+    }
+
+    function isMobileLoginPage() {
+        return isMobileContext() && window === window.top && location.hostname === "aq.115.com" && location.pathname === "/index/login";
+    }
+
+    function getModernFileURL(url) {
+        if (url.hostname !== "115.com" || url.pathname !== "/" || url.searchParams.has("ct") ||
+            !(url.searchParams.get("mode") === "wangpan" || url.searchParams.has("cid") || url.searchParams.has("old"))) return null;
+        const target = new URL(MOBILE_HOME);
+        const cid = new URLSearchParams(url.hash.slice(1)).get("cid") || url.searchParams.get("cid");
+        if (cid && /^\d+$/.test(cid)) target.searchParams.set("cid", cid);
+        return target.href;
+    }
+    function getMobileEntryTarget(url) {
+        if ((url.hostname === "w.115.com" && url.pathname === "/") ||
+            (url.hostname === "115.com" && url.pathname === "/" && url.searchParams.has("goto"))) {
+            // 新版鉴权失败会返回官网；手机官网只有下载入口，改用官方登录页。
+            return MOBILE_LOGIN;
+        } else if (url.hostname === "m.115.com" && url.pathname === "/") {
+            try {
+                const key = "tm115-mobile-return";
+                if (!sessionStorage.getItem(key)) {
+                    sessionStorage.setItem(key, "1");
+                    return MOBILE_HOME;
+                }
+            } catch {}
+            return MOBILE_LOGIN;
+        }
+        return getModernFileURL(url) ||
+            (url.hostname === "115.com" && url.pathname === "/" && !url.search ? MOBILE_HOME : null);
+    }
+
+    function redirectMobileEntry() {
+        if (!isMobileContext() || window !== window.top) return false;
+        const target = getMobileEntryTarget(new URL(location.href));
+        if (!target) return false;
+        location.replace(target);
+        return true;
+    }
+
+    if (redirectMobileEntry()) return;
+    if (document.readyState === "loading") {
         document.addEventListener("DOMContentLoaded", start, { once: true });
         return;
     }
@@ -30,6 +94,7 @@
 
     // 功能开关与播放参数分别保存，设置窗口只修改发生变化的项目。
     const config = {
+        mobile: { key: "tm115-mobile-enabled", label: "手机 / 平板网页适配" },
         list: { key: "tm115-list-enabled", label: "列表优化" },
         player: { key: "tm115-player-enabled", label: "播放器优化" },
         playlist: { key: "tm115-playlist-enabled", label: "播放器显示视频列表" },
@@ -48,45 +113,57 @@
             serializeValue: value => +value,
         },
     };
-    const getValue = typeof GM_getValue === "function"
-        ? GM_getValue
-        : (key, fallback) => fallback;
-    const setValue = typeof GM_setValue === "function" ? GM_setValue : () => {};
-    // 数值参数单独读取和校验，避免被当作开关转换成布尔值；异常存储值使用默认值。
-    const readValues = () => Object.fromEntries(Object.entries(config).map(([name, item]) => {
-        const value = getValue(item.key, item.defaultValue ?? true);
-        return [name, item.type === "number"
-            ? (item.validValue(value) ? item.defaultValue : +value)
-            : Boolean(value)];
-    }));
-    const values = readValues();
-    if (window === window.top && typeof GM_registerMenuCommand === "function") {
-        GM_registerMenuCommand("115 增强设置", async () => {
-            const currentValues = readValues();
-            const nextValues = await SettingsDialog.open({
-                title: "115 增强设置",
-                values: currentValues,
-                items: Object.entries(config).map(([name, item]) => ({ name, type: "checkbox", ...item })),
-                confirmText: "保存并刷新",
-                cancelText: "取消",
-            });
-            if (!nextValues) return;
-            let changed = false;
-            for (const [name, item] of Object.entries(config)) {
-                if (nextValues[name] === currentValues[name]) continue;
-                setValue(item.key, nextValues[name]);
-                changed = true;
-            }
-            if (changed) location.reload();
-        });
+    function setValue(key, value) {
+        if (typeof GM_setValue === "function") GM_setValue(key, value);
     }
 
-    const coarse = typeof matchMedia === "function" && matchMedia("(any-pointer: coarse)").matches;
+    // 数值参数单独读取和校验，避免被当作开关转换成布尔值；异常存储值使用默认值。
+    function readSettings() {
+        return Object.fromEntries(Object.entries(config).map(([name, item]) => {
+            const value = getValue(item.key, item.defaultValue ?? true);
+            return [name, item.type === "number"
+                ? (item.validValue(value) ? item.defaultValue : +value)
+                : Boolean(value)];
+        }));
+    }
+
+    async function openSettings() {
+        const currentValues = readSettings();
+        const nextValues = await SettingsDialog.open({
+            title: "115 增强设置",
+            values: currentValues,
+            items: Object.entries(config).map(([name, item]) => ({ name, type: "checkbox", ...item })),
+            confirmText: "保存并刷新",
+            cancelText: "取消",
+        });
+        if (!nextValues) return;
+        let changed = false;
+        for (const [name, item] of Object.entries(config)) {
+            if (nextValues[name] === currentValues[name]) continue;
+            setValue(item.key, nextValues[name]);
+            changed = true;
+        }
+        if (changed) location.reload();
+    }
+
+    function registerSettingsMenu() {
+        if (window === window.top && typeof GM_registerMenuCommand === "function") {
+            GM_registerMenuCommand("115 增强设置", openSettings);
+        }
+    }
+
+    const values = readSettings();
     const players = new Map();
+    let fullscreenOrientation;
+    const promoImages = 'img[src*="/spotlight/imgload"], img[alt*="Web端右下角广告"], img[alt*="Web端头部广告"]';
+    const popupSelector = '.ad-popup-container[id^="ad_popup_"]';
+    const style = createBaseStyle();
+
     // 样式集中注入：主要修正布局，并补充锁定图标和当前选集的对比度。
-    const style = document.createElement("style");
-    style.id = "tm115-player-style";
-    style.textContent = values.player ? `
+    function createBaseStyle() {
+        const style = document.createElement("style");
+        style.id = "tm115-player-style";
+        style.textContent = values.player ? `
         .tm115-player { position: relative; }
         .tm115-player.tm115-legacy { height: 100% !important; }
         #js-wrap:has(.tm115-legacy), .video-container:has(.tm115-legacy), .video-player:has(.tm115-legacy) {
@@ -146,14 +223,25 @@
             visibility: hidden !important; pointer-events: none !important;
         }
         .tm115-player.tm115-legacy .operate-bar { width: 100% !important; box-sizing: border-box; }
+        .tm115-player.tm115-controls-hidden > .absolute.inset-x-0.bottom-0:has(> [class~="group/progress"]) {
+            visibility: hidden !important; pointer-events: none !important;
+        }
+        /* 新版字幕固定留了 96px；只在控制栏显示时避让，桌面和手机共用，旧版不改。 */
+        .tm115-player:not(.tm115-legacy) > .absolute.left-0.right-0.bottom-24.pointer-events-none {
+            bottom: max(12px, env(safe-area-inset-bottom)) !important;
+        }
+        .tm115-player:not(.tm115-legacy, .tm115-controls-hidden, .tm115-locked):has(> .absolute.inset-x-0.bottom-0 > [class~="group/progress"]) > .absolute.left-0.right-0.bottom-24.pointer-events-none {
+            bottom: 88px !important;
+        }
+        .tm115-player.tm115-player-mobile:not(.tm115-controls-hidden, .tm115-locked):has(> .absolute.inset-x-0.bottom-0 > [class~="group/progress"]) > .absolute.left-0.right-0.bottom-24.pointer-events-none {
+            bottom: 56px !important;
+        }
         @media (max-width: 700px) {
             .tm115-player.tm115-legacy .vfs-name { max-width: 35%; overflow: hidden; }
         }
-    ` : "";
-    const promoImages = 'img[src*="/spotlight/imgload"], img[alt*="Web端右下角广告"], img[alt*="Web端头部广告"]';
-    const popupSelector = '.ad-popup-container[id^="ad_popup_"]';
-    if (values.ads) {
-        style.textContent += `
+        ` : "";
+        if (values.ads) {
+            style.textContent += `
             ${promoImages}, ${popupSelector}, .te115-ad-hidden,
             .video-pause-banner[rel="701adv"],
             #js_bottom_notification:has(#js_notification_detail),
@@ -161,22 +249,22 @@
             #js_common_mini-dialog:has(a[href*="115.com/77?f=ad1"]) {
                 display: none !important;
             }
-        `;
-    }
-    if (values.list) {
-        style.textContent += `
+            `;
+        }
+        if (values.list) {
+            style.textContent += `
             /* 只隐藏悬浮操作，保留原节点及其事件，供右键菜单调用。 */
-            li[rel="item"][file_type] .file-opr,
-            li[rel="item"][file_type] .file-name-wrap :is(.icon-star, .icon-remarks, .score-stars),
-            .file-list-item > div.hidden.group-hover\\:flex.absolute.left-0.right-0,
-            .file-list-item .te115-toolbar,
-            .file-list-item [data-menu-action] {
+            :is(
+                li[rel="item"][file_type] .file-opr,
+                li[rel="item"][file_type] .file-name-wrap :is(.icon-star, .icon-remarks, .score-stars),
+                .file-list-item > div.hidden.group-hover\\:flex.absolute.left-0.right-0,
+                .file-list-item [data-menu-action]) {
                 display: none !important;
             }
-        `;
-    }
-    if (values.playlist) {
-        style.textContent += `
+            `;
+        }
+        if (values.playlist) {
+            style.textContent += `
             .tm115-playlist {
                 position: relative; box-sizing: border-box; width: 100%; min-width: 0;
                 height: auto !important; padding: 12px; margin: 12px 0;
@@ -198,9 +286,493 @@
             }
             .tm115-playlist button[hidden] { display: none !important; }
             .tm115-playlist[hidden] { display: none !important; }
+            `;
+        }
+        (document.head || document.documentElement).append(style);
+        return style;
+    }
+
+    function setViewport() {
+        let meta = document.querySelector('meta[name="viewport"]');
+        const previousContent = meta?.getAttribute("content");
+        const created = !meta;
+        if (!meta) {
+            meta = document.createElement("meta");
+            meta.name = "viewport";
+            document.head.append(meta);
+        }
+        if (!mobileViewport) mobileViewport = { element: meta, created, content: previousContent };
+        const content = "width=device-width, initial-scale=1, viewport-fit=cover";
+        if (meta.content !== content) meta.content = content;
+        return meta;
+    }
+
+    const compactViewport = matchMedia("(max-width: 1024px)");
+    function isCompactViewport() {
+        return compactViewport.matches;
+    }
+    let navigation;
+    let navigationToggle;
+    let navigationLabel;
+    let navigationInteracted = false;
+    let navigationChannel;
+    let account;
+    let accountTrigger;
+    let accountExpanded;
+    let accountOpen = false;
+    let dispatchingAccount = false;
+    let mobileViewport;
+    let loginActions;
+    let mobileContent;
+    function setAccountOpen(open) {
+        if (accountOpen === open) return;
+        accountOpen = open;
+        document.documentElement.classList.toggle("tm115-account-open", open);
+        accountTrigger?.setAttribute("aria-expanded", String(open));
+        if (!accountTrigger?.isConnected) return;
+        // 复用 React 的原生进入/离开事件；手机的自动悬停事件由下方监听器隔离。
+        dispatchingAccount = true;
+        try {
+            accountTrigger.dispatchEvent(new MouseEvent(open ? "mouseover" : "mouseout", {
+                bubbles: true, relatedTarget: open ? null : document.body, view: window,
+            }));
+        } finally { dispatchingAccount = false; }
+    }
+    function closeNavigation() {
+        if (document.documentElement.matches(".tm115-mobile.tm115-nav-open")) {
+            navigationToggle?.querySelector("button")?.click();
+        }
+    }
+    function addMobileStyles() {
+        const content = '.tm115-mobile .tm115-content';
+        const pager = `${content} .flex.items-center.justify-between.flex-nowrap.overflow-x-auto:has(> .space-x-4)`;
+        const toolbar = `${content} :is(header, .border-b) .flex.items-center.justify-between:not(.flex-nowrap)`;
+        const informationRow = `${content} :is(.divide-y, .bg-gray-50.border-b) > .flex.max-w-full`;
+        style.textContent += `
+            /* 内容容器是所有频道（包括没有 main 的搜索页）的共同边界。 */
+            .tm115-mobile :has(> aside.container-leftside), ${content},
+            ${content} :is(main.flex-1, .flex[class*="min-w-"], .flex-col:not(.absolute, .fixed)):not(.tm115-navigation *) {
+                min-width: 0 !important; max-width: 100% !important;
+            }
+            .tm115-mobile .container-leftside { width: 52px !important; flex: 0 0 52px !important; overflow-x: hidden; }
+            .tm115-touch .tm115-old-entry { display: none !important; }
+            .tm115-mobile .tm115-navigation {
+                max-width: 100% !important; min-width: 0 !important;
+            }
+            .tm115-touch.tm115-account-open, .tm115-touch.tm115-account-open body { overflow: hidden !important; overscroll-behavior: none; }
+            .tm115-mobile.tm115-nav-open .tm115-navigation {
+                position: fixed !important; inset: 0 auto 0 0 !important; z-index: 100;
+                width: calc(100vw - var(--tm115-toggle-width, 20px)) !important;
+            }
+            .tm115-mobile .tm115-navigation > div { transform: none !important; width: 100% !important; height: 100% !important; }
+            .tm115-mobile .tm115-navigation :is(div, a) { box-sizing: border-box; max-width: 100% !important; }
+            .tm115-mobile .tm115-nav-toggle {
+                position: relative !important; top: 74px !important; left: auto !important;
+                transform: none !important; align-self: flex-start; flex: 0 0 auto;
+            }
+            .tm115-mobile.tm115-nav-open .tm115-nav-toggle {
+                position: fixed !important; top: 74px !important;
+                left: auto !important; right: 0 !important; z-index: 101 !important;
+            }
+            .tm115-mobile :is(div, section):has(> .tm115-navigation) { min-width: 0; overflow: hidden; }
+            .tm115-touch.tm115-account-open .tm115-content { pointer-events: none; }
+            .tm115-touch .tm115-account-trigger { cursor: pointer; touch-action: manipulation; }
+            .tm115-touch .tm115-account-menu {
+                position: fixed !important; left: var(--tm115-account-left, 8px) !important; right: auto !important;
+                top: var(--tm115-account-top, auto) !important; bottom: var(--tm115-account-bottom, 8px) !important;
+                width: min(360px, calc(100vw - 16px)) !important; margin: 0 !important; z-index: 10002 !important;
+                max-height: var(--tm115-account-height, calc(100dvh - 16px)); overflow: auto; overscroll-behavior: contain;
+            }
+            .tm115-touch .tm115-account-menu > div:has(button) { width: 100% !important; max-width: 100%; }
+            .tm115-touch:not(.tm115-account-open) .tm115-account-menu { visibility: hidden; pointer-events: none; }
+            ${content} :is(input, textarea), ${content} div:has(> input[type="text"], > input[type="search"]) { min-width: 0; max-width: 100%; box-sizing: border-box; }
+            ${toolbar}, ${toolbar} > .flex { min-width: 0; max-width: 100%; flex-wrap: wrap; gap: 8px; }
+            ${content} button { white-space: nowrap; flex-shrink: 0; }
+            ${content} button > :is(span, svg, img) { flex-shrink: 0; }
+            /* 原生分页的两种形态共用结构：文件页有选择框/每页，搜索页只有加载与总数。 */
+            ${pager} { height: auto !important; min-height: 52px; flex-wrap: wrap !important; gap: 8px; padding-block: 8px; overflow: visible !important; }
+            ${pager} > .space-x-4 { display: flex; flex: 1 1 100%; min-width: 0; flex-wrap: wrap; gap: 8px; }
+            ${pager} > .space-x-4 > * { margin: 0 !important; }
+            ${pager} .sel-label { margin: 0 !important; }
+            ${pager} > .space-x-4 > .text-sm { min-width: 0; flex-shrink: 1; }
+            ${pager} > .space-x-4 > .space-x-2 { order: 1; flex: 1 0 100%; min-width: 0; overflow-x: auto; justify-content: safe center; }
+            ${pager} > .space-x-4 > .space-x-2 > * { flex-shrink: 0; }
+            ${pager} input[placeholder="GO"] { width: 4em; }
+            .tm115-player-mobile, :is(div, main, section):has(.tm115-player-mobile) { min-width: 0 !important; max-width: 100% !important; }
+            .tm115-player-mobile {
+                container-type: inline-size;
+                --tm115-control-icon: 14px; --tm115-control-font: 10px; --tm115-control-gap: 1px;
+            }
+            @supports (width: 1cqw) {
+                .tm115-player-mobile {
+                    --tm115-control-icon: clamp(14px, 4.5cqw, 20px);
+                    --tm115-control-font: clamp(10px, 3.2cqw, 12px);
+                    --tm115-control-gap: clamp(1px, calc((100cqw - 300px) / 100), 4px);
+                }
+            }
+            .tm115-player-mobile .tm115-native-controls:has(> .flex.items-center.justify-between) { padding-inline: 4px !important; padding-bottom: 4px !important; }
+            .tm115-player-mobile .tm115-native-controls > .flex.items-center.justify-between,
+            .tm115-player-mobile .tm115-native-controls > .flex.items-center.justify-between > div {
+                min-width: 0; flex-wrap: nowrap !important; gap: var(--tm115-control-gap) !important;
+            }
+            .tm115-player-mobile .tm115-native-controls > .flex.items-center.justify-between > div { flex: 0 0 auto; }
+            .tm115-player-mobile .tm115-native-controls > .flex.items-center.justify-between > div:first-child { flex: 1 1 auto; }
+            .tm115-player-mobile .tm115-native-controls > .flex.items-center.justify-between > div > button,
+            .tm115-player-mobile .tm115-native-controls > .flex.items-center.justify-between > div > div > button {
+                min-width: 14px; min-width: clamp(14px, 5cqw, 24px); min-height: 24px;
+                max-width: none; padding: 1px !important;
+                font-size: var(--tm115-control-font) !important; line-height: 1.1; white-space: nowrap;
+                flex-shrink: 0;
+            }
+            .tm115-player-mobile .tm115-native-controls > .flex.items-center.justify-between > div > button > :is(svg, img),
+            .tm115-player-mobile .tm115-native-controls > .flex.items-center.justify-between > div > div > button > :is(svg, img) {
+                width: var(--tm115-control-icon) !important; height: var(--tm115-control-icon) !important;
+            }
+            .tm115-player-mobile .tm115-native-controls > .flex.items-center.justify-between > div:first-child > span {
+                min-width: 0; font-size: 11px !important; white-space: nowrap; font-variant-numeric: tabular-nums;
+                overflow: hidden; text-overflow: ellipsis;
+            }
+            .tm115-mobile :is(.file-info-responsive, [data-file-info-panel]),
+            .tm115-mobile :is(.file-list-item, .file-grid-item) [data-menu-action],
+            .tm115-mobile .file-list-item > div.hidden.group-hover\\:flex.absolute.left-0.right-0 { display: none !important; }
+            .tm115-mobile :is(.file-list-item, .file-grid-item) { -webkit-user-select: none; user-select: none; }
+            .tm115-mobile .file-list-item > .flex.items-center { flex: 1; min-width: 0; padding: 4px 0 4px 6px; transform: none; }
+            .tm115-mobile .file-grid-item div:has(> input[type="checkbox"]) { opacity: 1 !important; }
+            ${content} .file-name-responsive { min-width: 0; max-width: 100%; }
+            ${content} :has(+ .file-list-wrap) > .flex { flex-wrap: wrap; gap: 8px; padding: 8px !important; }
+            ${content} :has(+ .file-list-wrap) > .flex > button { width: auto !important; }
+            /* 定宽信息行按组件换行；名称和操作占整行，不依赖页面名或第几列。 */
+            ${informationRow} { flex-wrap: wrap !important; gap: 8px; padding: 12px !important; }
+            ${informationRow} > div:not(.absolute, .fixed):not(:has(input[type="checkbox"])) {
+                flex: 1 1 8rem; min-width: 0 !important; width: auto !important; max-width: 100% !important; margin: 0 !important;
+            }
+            ${informationRow} > div:not(.absolute, .fixed):is(.overflow-hidden, :has(button)) { flex-basis: 100%; }
+            ${informationRow} > .flex:not(.flex-col):has(button) { flex-wrap: wrap; gap: 8px; }
+            ${content} .grid:has(> .file-grid-item, > div > .file-grid-item, > div input[type="checkbox"]) {
+                grid-template-columns: repeat(auto-fit, minmax(min(120px, 100%), 1fr)) !important;
+            }
+            .tm115-mobile :is([role="dialog"], [data-dialog="true"], .dialog-box, .context-menu) {
+                box-sizing: border-box; max-width: calc(100vw - 16px) !important;
+                max-height: calc(100dvh - 16px) !important; overflow: auto;
+            }
+            .tm115-mobile .dialog-scroll > div { padding: 16px !important; }
+            .tm115-mobile .dialog-scroll .grid-cols-3 { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+            .tm115-mobile :is([data-dialog="true"], [role="dialog"], .dialog-box) .flex:not(.flex-col):has(> button):not(:has(input)),
+            .tm115-mobile :is([data-dialog="true"], [role="dialog"], .dialog-box) :is(footer, [role="toolbar"]) { flex-wrap: wrap; gap: 8px; }
+            .tm115-mobile :is([data-dialog="true"], [role="dialog"], .dialog-box) button { white-space: nowrap; flex-shrink: 0; }
+            .tm115-mobile .dialog-scroll div:has(> div > input[type="date"]) { flex-wrap: wrap; }
+            .tm115-mobile .dialog-scroll div:has(> input[type="date"]) { flex: 1 1 180px; min-width: 0; }
+            .tm115-mobile .dialog-scroll input[type="date"] { width: 100%; min-width: 0; box-sizing: border-box; }
+            .tm115-mobile .dialog-scroll div:has(> div > input[type="date"]) > span { display: none; }
+            .tm115-mobile .dialog-scroll div:has(> div > input[type="date"]) > button { flex: 1 0 100%; min-height: 44px; }
         `;
     }
-    (document.head || document.documentElement).append(style);
+
+    function initMobileEvents() {
+        window.addEventListener("resize", refreshViewport);
+        document.addEventListener("pointerdown", () => { if (isMobileDashboard()) navigationInteracted = true; }, true);
+        for (const type of ["mouseover", "mouseout"]) document.addEventListener(type, event => {
+            if (!dispatchingAccount && isMobileDashboard() && document.documentElement.classList.contains("tm115-touch") && account?.contains(event.target)) {
+                event.stopImmediatePropagation();
+            }
+        }, true);
+        document.addEventListener("click", handleMobileClick, true);
+        document.addEventListener("keydown", event => {
+            if (!isMobileDashboard()) return;
+            navigationInteracted = true;
+            if (event.key === "Escape") { closeNavigation(); setAccountOpen(false); }
+        });
+    }
+
+    function refreshViewport() {
+        refreshMobile();
+        refreshPlayers();
+    }
+
+    function handleMobileClick(event) {
+        if (!isMobileDashboard()) return;
+        if (document.documentElement.classList.contains("tm115-touch")) {
+            if (accountTrigger?.contains(event.target)) {
+                // 购买 VIP 是账户区域内的独立 div 控件，不能只排除 a / button。
+                const control = event.target.closest?.('a, button, [role="button"], .btn-golden');
+                if (control && accountTrigger.contains(control)) {
+                    setAccountOpen(false);
+                    return;
+                }
+                event.preventDefault();
+                event.stopImmediatePropagation();
+                closeNavigation();
+                setAccountOpen(!accountOpen);
+                return;
+            }
+            if (accountOpen) {
+                if (!event.target.closest?.(".tm115-account-menu")) {
+                    setAccountOpen(false);
+                    event.preventDefault();
+                    event.stopImmediatePropagation();
+                    return;
+                }
+                if (event.target.closest?.("a, button")) setTimeout(() => setAccountOpen(false), 0);
+            }
+        }
+        const link = event.target.closest?.("a[href]");
+        if (link) {
+            const target = getModernFileURL(new URL(link.href, location.href));
+            if (target) link.href = target;
+        }
+        if (event.target.closest?.(".tm115-nav-toggle")) return;
+        // 先让原生链接完成路由处理，再收起侧栏，避免同步重绘吞掉点击。
+        if (link) setTimeout(closeNavigation, 0);
+        else if (!event.target.closest?.(".tm115-navigation")) closeNavigation();
+    }
+
+    function addLoginStyles() {
+        style.textContent += `
+                .tm115-login .register-container { width: auto !important; max-width: 420px; margin: 20px auto !important; padding: 16px; box-sizing: border-box; }
+                .tm115-login .register-container h1 { font-size: 24px; text-align: center; }
+                .tm115-login .register-box { box-sizing: border-box; width: 100% !important; margin: 0; padding: 16px 0 !important; }
+                .tm115-login .register-box .row { display: flex; flex-wrap: wrap; gap: 8px; height: auto; margin-bottom: 20px; }
+                .tm115-login .register-box h3 { position: static; flex: 1 0 100%; width: auto; height: auto; line-height: 24px; text-align: left; }
+                .tm115-login .register-box .input-cell { box-sizing: border-box; min-width: 0; margin: 0; }
+                .tm115-login .register-box .input-mobile { width: 100%; }
+                .tm115-login .register-box .input-mobile .con { flex: 1; min-width: 0; }
+                .tm115-login .register-box .input-cell input:not([type="hidden"]) { box-sizing: border-box; width: 100%; height: 48px; }
+                .tm115-login .register-box .input-vcode { flex: 1 1 130px; }
+                .tm115-login .register-box .btn-getvcode { flex: 1 1 160px; width: auto; }
+                .tm115-login .register-box .reg-action > * { width: 100% !important; }
+                .tm115-login .register-box .agreement { display: block; }
+                .tm115-login .common-login-box {
+                    position: fixed !important; left: 50% !important; top: 50% !important;
+                    transform: translate(-50%, -50%); margin: 0 !important;
+                    min-height: 0 !important; max-width: calc(100vw - 16px) !important;
+                    max-height: calc(100dvh - 16px); overflow: auto;
+                }
+                .tm115-login .common-login-box .login-contents { padding: 24px 20px; }
+                .tm115-login .common-login-box .login-row { box-sizing: border-box; border-bottom: 1px solid #ddd; }
+                .tm115-login .common-login-box .lr-account { align-items: center; }
+                .tm115-login .common-login-box .region-title { width: auto; height: 32px; line-height: 32px; padding: 0 8px; flex-shrink: 0; }
+                .tm115-login .common-login-box .input-cell { box-sizing: border-box; width: auto; min-width: 0; border: 0; background: transparent; }
+                .tm115-login .common-login-box .input-cell input { box-sizing: border-box; width: 100% !important; max-width: 100%; }
+                .tm115-login #tm115-login-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 12px; padding: 16px; }
+                .tm115-login #tm115-login-actions :is(button, a) { padding: 10px 16px; border: 1px solid #2777f8; border-radius: 6px; background: #fff; color: #2777f8; font-size: 14px; }
+        `;
+    }
+
+    function initMobileLogin() {
+        if (!isMobileLoginPage()) return;
+        document.documentElement.classList.add("tm115-login");
+        addLoginStyles();
+        const actions = document.createElement("div");
+        loginActions = actions;
+        actions.id = "tm115-login-actions";
+        const loginButton = document.createElement("button");
+        loginButton.type = "button";
+        loginButton.textContent = "密码 / 扫码登录";
+        loginButton.onclick = openOfficialLogin;
+        const enter = document.createElement("a");
+        enter.href = MOBILE_HOME;
+        enter.textContent = "登录完成，进入网盘";
+        actions.append(loginButton, enter);
+        document.body.prepend(actions);
+        returnAfterLogin();
+    }
+
+    function openOfficialLogin() {
+        if (!isMobileLoginPage()) return;
+        const pageWindow = typeof unsafeWindow === "undefined" ? window : unsafeWindow;
+        pageWindow.oofUtil?.login?.boxLogin?.show(result => {
+            // 官方回调先于 Cookie 收尾，下一任务再导航。
+            if (result?.state && !result.is_two) setTimeout(() => {
+                if (isMobileLoginPage()) location.replace(MOBILE_HOME);
+            }, 0);
+        });
+    }
+
+    function resetMobileLogin() {
+        loginActions?.remove();
+        loginActions = null;
+        document.documentElement.classList.remove("tm115-login");
+    }
+
+    function returnAfterLogin() {
+        if (!isMobileLoginPage()) return;
+        const pageWindow = typeof unsafeWindow === "undefined" ? window : unsafeWindow;
+        pageWindow.oofUtil?.loginApi?.isLogin(result => {
+            if (!isMobileLoginPage() || !result?.state || !result.data?.USER_ID) return;
+            try {
+                // 两站鉴权结果不一致时不自动往返；仍保留手动进入入口。
+                const key = "tm115-login-return";
+                if (sessionStorage.getItem(key)) return;
+                sessionStorage.setItem(key, "1");
+                location.replace(MOBILE_HOME);
+            } catch {}
+        });
+    }
+
+    function restoreAttribute(element, name, value) {
+        if (!element) return;
+        if (value == null) element.removeAttribute(name);
+        else element.setAttribute(name, value);
+    }
+
+    function resetAccount() {
+        setAccountOpen(false);
+        for (const menu of account?.querySelectorAll(".tm115-account-menu") || []) {
+            menu.classList.remove("tm115-account-menu");
+            for (const name of ["left", "top", "bottom", "height"]) menu.style.removeProperty(`--tm115-account-${name}`);
+        }
+        account?.classList.remove("tm115-account");
+        accountTrigger?.classList.remove("tm115-account-trigger");
+        restoreAttribute(accountTrigger, "aria-expanded", accountExpanded);
+        account = accountTrigger = null;
+    }
+
+    function positionAccountMenu(menu) {
+        const bounds = accountTrigger.getBoundingClientRect();
+        const above = bounds.top >= innerHeight / 2;
+        const available = above ? bounds.top - 16 : innerHeight - bounds.bottom - 16;
+        const left = Math.max(8, Math.min(bounds.right + 8, innerWidth - Math.min(360, innerWidth - 16) - 8));
+        const positions = {
+            "--tm115-account-left": `${left}px`,
+            "--tm115-account-top": above ? "auto" : `${Math.max(8, bounds.bottom + 8)}px`,
+            "--tm115-account-bottom": above ? `${Math.max(8, innerHeight - bounds.top + 8)}px` : "auto",
+            "--tm115-account-height": `${Math.max(0, Math.min(innerHeight - 16, available))}px`,
+        };
+        for (const [name, value] of Object.entries(positions)) {
+            if (menu.style.getPropertyValue(name) !== value) menu.style.setProperty(name, value);
+        }
+    }
+
+    function refreshAccount(shell) {
+        const avatar = shell.querySelector('img[alt$="的头像"]');
+        let owner = null;
+        for (let node = avatar?.parentElement; node && node !== shell; node = node.parentElement) {
+            if (node.classList.contains("relative") && !node.querySelector("nav")) owner = node;
+        }
+        // 原生会员标识覆盖头像下缘；使用完整账户区域接住头像、标识和昵称的点击。
+        let trigger = avatar;
+        if (owner) while (trigger.parentElement !== owner) trigger = trigger.parentElement;
+        if (account !== owner || accountTrigger !== (owner ? trigger : null)) {
+            resetAccount();
+            account = owner;
+            accountTrigger = owner ? trigger : null;
+            accountExpanded = accountTrigger?.getAttribute("aria-expanded");
+        }
+        if (account && accountTrigger) {
+            if (!account.classList.contains("tm115-account")) account.classList.add("tm115-account");
+            if (!accountTrigger.classList.contains("tm115-account-trigger")) accountTrigger.classList.add("tm115-account-trigger");
+            const menu = [...account.children].find(node => !node.contains(accountTrigger) && node.matches("div") && node.querySelector("button"));
+            if (menu) {
+                if (!menu.classList.contains("tm115-account-menu")) menu.classList.add("tm115-account-menu");
+                positionAccountMenu(menu);
+            }
+        }
+    }
+
+    function hideLegacyEntries(shell) {
+        for (const link of shell.parentElement.querySelectorAll(":scope > a[href]")) {
+            if (!link.classList.contains("tm115-old-entry") && link.textContent.includes("切换旧版") &&
+                getComputedStyle(link).position === "fixed") {
+                link.classList.add("tm115-old-entry");
+            }
+        }
+    }
+
+    function resetNavigation() {
+        navigation?.classList.remove("tm115-navigation");
+        navigation?.style.removeProperty("--tm115-toggle-width");
+        navigationToggle?.classList.remove("tm115-nav-toggle");
+        restoreAttribute(navigationToggle?.querySelector("button"), "aria-label", navigationLabel);
+        navigation = navigationToggle = null;
+        document.documentElement.classList.remove("tm115-nav-open");
+    }
+
+    function refreshNavigation(panel) {
+        const root = document.documentElement;
+        const toggle = panel?.nextElementSibling;
+        if (!toggle?.matches('div') || !toggle.querySelector('button') || toggle.querySelector('main, input, a[href]')) {
+            resetNavigation();
+            return;
+        }
+        if (navigation !== panel || navigationToggle !== toggle) {
+            resetNavigation();
+            navigation = panel;
+            navigationToggle = toggle;
+            navigationLabel = toggle.querySelector("button").getAttribute("aria-label");
+        }
+        if (!panel.classList.contains("tm115-navigation")) panel.classList.add("tm115-navigation");
+        if (!toggle.classList.contains("tm115-nav-toggle")) toggle.classList.add("tm115-nav-toggle");
+        updateNavigationWidth(panel, toggle);
+        // 只跟随原生收起状态，不另设开关，也不覆盖站点的 opacity / pointer-events。
+        const expanded = getComputedStyle(panel).pointerEvents !== "none";
+        root.classList.toggle("tm115-nav-open", expanded);
+        if (expanded) setAccountOpen(false);
+        const button = toggle.querySelector("button");
+        const label = expanded ? "收起侧栏" : "展开侧栏";
+        if (button.getAttribute("aria-label") !== label) button.setAttribute("aria-label", label);
+        if (expanded && !navigationInteracted) {
+            // 原生配置可能异步恢复展开状态；首次交互前收起，交互后不再覆盖用户选择。
+            setTimeout(() => { if (navigation === panel && !navigationInteracted) closeNavigation(); }, 0);
+        }
+    }
+
+    function updateNavigationWidth(panel, toggle) {
+        // 原生箭头悬停时宽度会变化，只预留实际宽度，不另设大号关闭区。
+        const width = `${Math.ceil(toggle.getBoundingClientRect().width)}px`;
+        if (panel.style.getPropertyValue("--tm115-toggle-width") !== width) panel.style.setProperty("--tm115-toggle-width", width);
+    }
+
+    function initMobile() {
+        if (!isMobileContext()) return;
+        addMobileStyles();
+        initMobileEvents();
+        initMobileLogin();
+        if (isMobileLoginPage() ||
+            (window === window.top && location.hostname === "115.com" && location.pathname.startsWith("/players/video/"))) {
+            setViewport();
+        }
+    }
+
+    function resetMobileViewport() {
+        if (!mobileViewport) return;
+        const { element, created, content } = mobileViewport;
+        if (element.content === "width=device-width, initial-scale=1, viewport-fit=cover") {
+            if (created) element.remove();
+            else restoreAttribute(element, "content", content);
+        }
+        mobileViewport = null;
+    }
+
+    function refreshMobile() {
+        if (!mobileEnabled) return;
+        const root = document.documentElement;
+        const shell = isMobileDashboard() ? document.querySelector("aside.container-leftside") : null;
+        const content = shell?.parentElement.querySelector(':scope > div.flex-1');
+        const compact = Boolean(content) && isCompactViewport();
+        if (!compact) closeNavigation();
+        root.classList.toggle("tm115-mobile", compact);
+        root.classList.toggle("tm115-touch", Boolean(shell));
+        if (mobileContent !== content) mobileContent?.classList.remove("tm115-content");
+        mobileContent = content;
+        mobileContent?.classList.toggle("tm115-content", compact);
+        if (!isMobileContext()) {
+            resetMobileLogin();
+            resetMobileViewport();
+            document.querySelectorAll('.tm115-old-entry').forEach(node => node.classList.remove('tm115-old-entry'));
+        }
+        if (!shell) { resetAccount(); resetNavigation(); return; }
+        if (content && !mobileViewport) setViewport();
+        refreshAccount(shell);
+        hideLegacyEntries(shell);
+        if (!compact) { resetNavigation(); return; }
+        const channel = location.pathname.split("/")[1];
+        if (navigationChannel !== channel) {
+            navigationChannel = channel;
+            navigationInteracted = false;
+            setAccountOpen(false);
+        }
+        refreshNavigation(content.querySelector('main.flex-shrink-0'));
+    }
 
     const closedAds = new WeakSet();
     function closeAd(button) {
@@ -234,18 +806,8 @@
         });
     }
 
-    function refreshList() {
-        if (!values.list) return;
-        document.querySelectorAll(".file-list-item").forEach(row => {
-            const content = row.querySelector(":scope > .flex.items-center");
-            const toolbar = [...row.children].find(child => child !== content &&
-                !child.matches('.file-list-item') && child.querySelector('[data-menu-action]')) ||
-                row.querySelector(':scope > div.hidden.group-hover\\:flex.absolute.left-0.right-0');
-            if (toolbar && !toolbar.classList.contains('te115-toolbar')) toolbar.classList.add('te115-toolbar');
-        });
-    }
-
-    if (values.list) {
+    function initListMenus() {
+        if (!values.list && !mobileEnabled) return;
         // 文件行的悬浮操作会遮挡邻近内容，因此把缺少的操作合并进站点原生右键菜单。
         const documents = [document];
         try { if (window.parent !== window) documents.push(window.parent.document); } catch {}
@@ -259,7 +821,7 @@
         const itemSelector = 'li[val], [role="menuitem"], a, button';
         const menuSelector = '.context-menu, [role="menu"], div.fixed[class~="z-[10000]"]:has(button.w-full.text-left)';
         const controlSelector = 'button, a, [role="button"]';
-        const controlsOf = row => [...row.querySelectorAll('.te115-toolbar, .file-opr')].flatMap(toolbar =>
+        const controlsOf = row => [...row.querySelectorAll('.file-opr, :is(div, span):has(> [data-menu-action])')].flatMap(toolbar =>
             [...toolbar.querySelectorAll(`[data-menu-action], ${controlSelector}`)].flatMap(wrapper => {
                 const original = wrapper.querySelector(controlSelector) || (wrapper.matches(controlSelector) ? wrapper : null);
                 if (!original) return [];
@@ -293,12 +855,15 @@
         for (const owner of documents) {
             listen(owner, 'contextmenu', event => {
                 cleanup();
-                const row = event.target.closest?.('.file-list-item, li[rel="item"][file_type]');
+                if (!values.list && !(isMobileDashboard() && isCompactViewport())) return;
+                const row = event.target.closest?.('.file-list-item, .file-grid-item, li[rel="item"][file_type]');
                 if (!row) return;
                 const augment = () => {
-                    if (!row.isConnected) { cleanup(); return; }
+                    const mobile = isMobileDashboard() && isCompactViewport();
+                    if (!row.isConnected || (!values.list && !mobile)) { cleanup(); return; }
                     // 新版关闭对话框后，右键菜单偶尔停留在隐藏测量状态，需要补齐定位和显示。
                     for (const candidate of document.querySelectorAll('div.fixed[class~="z-[10000]"]:has(button.w-full.text-left)')) {
+                        if (!mobile) break;
                         if (candidate.style.visibility !== 'hidden' || !candidate.getClientRects().length) continue;
                         candidate.style.maxHeight = `${innerHeight - 16}px`;
                         const bounds = candidate.getBoundingClientRect();
@@ -387,6 +952,7 @@
             // 在 window 捕获阶段处理新增项，避免外层页面先关闭菜单、导致点击丢失。
             for (const type of ['pointerdown', 'mousedown', 'click', 'keydown']) listen(owner.defaultView, type, event => {
                 if (invoking) return;
+                if (!values.list && !(isMobileDashboard() && isCompactViewport())) { cleanup(); return; }
                 if (type === 'keydown') {
                     if (event.key === 'Escape') cleanup();
                     return;
@@ -433,6 +999,57 @@
         });
     }
 
+    function isOutsideGestureArea(x, y, rect) {
+        return x < rect.left + 24 || x > rect.right - 56 || y < rect.top + 56 || y > rect.bottom - 80;
+    }
+
+    function initFullscreenOrientation() {
+        const orientation = screen.orientation;
+        if (!values.player || !isMobileContext() || typeof orientation?.lock !== "function" || typeof orientation.unlock !== "function") return null;
+        let activeVideo = null;
+        let nativeVideo = null;
+        let ownsLock = false;
+        let pageActive = true;
+
+        function release() {
+            if (!ownsLock) return;
+            ownsLock = false;
+            try { orientation.unlock(); } catch {}
+        }
+
+        function sync() {
+            if (nativeVideo && (!nativeVideo.isConnected || !players.has(nativeVideo))) nativeVideo = null;
+            const fullscreen = document.fullscreenElement || document.webkitFullscreenElement;
+            const nextVideo = pageActive && isMobileContext() && [...players.keys()].find(video => video.isConnected &&
+                (video === nativeVideo || fullscreen === video ||
+                    (fullscreen?.contains(video) && fullscreen.querySelectorAll("video").length === 1))) || null;
+            if (nextVideo === activeVideo) return;
+            activeVideo = nextVideo;
+            if (!activeVideo) { release(); return; }
+            try {
+                Promise.resolve(orientation.lock("landscape")).then(() => {
+                    ownsLock = true;
+                    // 请求可能在退出之后才完成；若另一个播放器已进入全屏，不解锁它。
+                    if (!activeVideo) release();
+                }, () => {});
+            } catch {}
+        }
+
+        for (const event of ["fullscreenchange", "webkitfullscreenchange"]) document.addEventListener(event, sync);
+        document.addEventListener("webkitbeginfullscreen", event => {
+            if (!players.has(event.target)) return;
+            nativeVideo = event.target;
+            sync();
+        }, true);
+        document.addEventListener("webkitendfullscreen", event => {
+            if (nativeVideo !== event.target) return;
+            nativeVideo = null;
+            sync();
+        }, true);
+        window.addEventListener("pagehide", () => { pageActive = false; nativeVideo = null; sync(); });
+        window.addEventListener("pageshow", () => { pageActive = true; sync(); });
+        return { sync };
+    }
     function enhancePlayer(video, root, legacy) {
         const abort = new AbortController();
         const listen = (target, type, callback, options = {}) => {
@@ -458,20 +1075,9 @@
         });
         fullscreenObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
 
-        let viewportMeta;
-        let previousViewport;
-        let createdViewport = false;
-        if (legacy && coarse && window === window.top) {
-            viewportMeta = document.querySelector('meta[name="viewport"]');
-            previousViewport = viewportMeta?.getAttribute("content");
-            if (!viewportMeta) {
-                viewportMeta = document.createElement("meta");
-                viewportMeta.name = "viewport";
-                document.head.append(viewportMeta);
-                createdViewport = true;
-            }
+        if (legacy && isMobileContext() && window === window.top) {
             // 旧版缺少合适的 viewport，页面缩放和视频像素尺寸会脱节。
-            viewportMeta.content = "width=device-width, initial-scale=1, viewport-fit=cover";
+            setViewport();
         }
 
         let hideTimer;
@@ -479,6 +1085,7 @@
         const zoomButtons = legacy ? [...root.querySelectorAll('[btn="zoom"]')].map(button => [button, button.classList.contains("current")]) : [];
         let gesture;
         let suppressClickUntil = 0;
+        let tapTimer;
         const interactive = 'a, button, input, select, textarea, summary, [role="button"], [role="slider"], [contenteditable="true"], .operate-bar, .video-dialog-box, .video-full-screen, .bar-progress';
         // 锁定只阻止播放器交互，不暂停视频；解锁按钮始终保留可操作状态。
         let locked = false;
@@ -586,6 +1193,54 @@
         listen(root, "focusin", revealLock);
         listen(root, "keydown", revealLock);
         revealLock();
+
+        // 新版移动 UA：单击显隐，双击播放。只受播放器优化开关控制，与 mobileEnabled 无关。
+        if (!legacy) {
+            let pressed;
+            const surface = event => event.target === video || event.target === root;
+            const cancelTap = () => { pressed = null; clearTimeout(tapTimer); tapTimer = null; };
+            const toggleControls = () => {
+                tapTimer = null;
+                if (!isMobileDevice() || !root.isConnected || locked) return;
+                const bar = root.querySelector(':scope > .absolute.inset-x-0.bottom-0:has(> [class~="group/progress"])');
+                const hide = Boolean(bar) && !root.classList.contains("tm115-controls-hidden");
+                root.classList.toggle("tm115-controls-hidden", hide);
+                // 原生控制栏会卸载；用公开鼠标事件让站点重新显示，不读取 React 状态。
+                if (!hide) root.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, view: window }));
+            };
+            listen(root, "pointerdown", event => {
+                if (!isMobileDevice() || !surface(event) || locked || event.button !== 0) return;
+                if (!event.isPrimary) { cancelTap(); return; }
+                pressed = { id: event.pointerId, x: event.clientX, y: event.clientY, time: Date.now() };
+            }, { capture: true });
+            listen(root, "pointermove", event => {
+                if (pressed?.id === event.pointerId && Math.hypot(event.clientX - pressed.x, event.clientY - pressed.y) > 12) cancelTap();
+            }, { capture: true });
+            listen(root, "pointerup", event => {
+                if (pressed?.id !== event.pointerId) return;
+                const short = Date.now() - pressed.time < 350 &&
+                    Math.hypot(event.clientX - pressed.x, event.clientY - pressed.y) <= 12 && (!gesture || gesture.mode === "pending");
+                pressed = null;
+                if (!short || !surface(event) || !isMobileDevice() || locked) { cancelTap(); return; }
+                if (tapTimer) {
+                    clearTimeout(tapTimer);
+                    tapTimer = null;
+                    if (video.paused) video.play().catch(() => {});
+                    else video.pause();
+                } else tapTimer = setTimeout(toggleControls, 300);
+            }, { capture: true });
+            for (const type of ["click", "dblclick"]) listen(root, type, event => {
+                if (!isMobileDevice() || !surface(event) || event.detail === 0) return;
+                event.preventDefault();
+                event.stopImmediatePropagation();
+            }, { capture: true });
+            listen(root, "pointercancel", cancelTap, { capture: true });
+            listen(document, "touchstart", event => { if (event.touches.length > 1) cancelTap(); }, { capture: true, passive: true });
+            listen(window, "resize", () => {
+                if (!isMobileDevice()) { cancelTap(); root.classList.remove("tm115-controls-hidden"); }
+            });
+            for (const type of ["blur", "pagehide"]) listen(window, type, cancelTap);
+        }
 
         function show(text, timeout = 0) {
             clearTimeout(hideTimer);
@@ -718,8 +1373,7 @@
             const point = event.touches[0];
             const rect = root.getBoundingClientRect();
             // 为边缘按钮、底部进度条和系统边缘手势留出区域，避免抢占原生交互。
-            if (point.clientX < rect.left + 24 || point.clientX > rect.right - 56 ||
-                point.clientY < rect.top + 56 || point.clientY > rect.bottom - 80) return;
+            if (isOutsideGestureArea(point.clientX, point.clientY, rect)) return;
             finish();
             gesture = {
                 id: point.identifier, x: point.clientX, y: point.clientY, width: rect.width,
@@ -772,8 +1426,7 @@
             if (event.button !== 0 || event.sourceCapabilities?.firesTouchEvents ||
                 event.target.closest(interactive) || Date.now() < suppressClickUntil) return;
             const rect = root.getBoundingClientRect();
-            if (event.clientX < rect.left + 24 || event.clientX > rect.right - 56 ||
-                event.clientY < rect.top + 56 || event.clientY > rect.bottom - 80) return;
+            if (isOutsideGestureArea(event.clientX, event.clientY, rect)) return;
             finish();
             const current = gesture = {
                 mode: "pending", mouse: true, x: event.clientX, y: event.clientY, width: rect.width,
@@ -839,6 +1492,7 @@
                 finish();
                 clearTimeout(hideTimer);
                 clearTimeout(lockTimer);
+                clearTimeout(tapTimer);
                 fullscreenObserver.disconnect();
                 controlsObserver?.disconnect();
                 for (const node of nativeControls) node.classList.remove("tm115-native-controls");
@@ -846,17 +1500,13 @@
                 restorePrompt();
                 abort.abort();
                 for (const [button, current] of zoomButtons) button.classList.toggle("current", current);
-                root.classList.remove("tm115-player", "tm115-legacy", "tm115-cover", "tm115-locked");
+                root.classList.remove("tm115-player", "tm115-player-mobile", "tm115-legacy", "tm115-cover", "tm115-locked", "tm115-controls-hidden");
                 root.style.removeProperty('--tm115-scale');
                 if (video.getAttribute("playsinline") === "") {
                     if (previousInline == null) video.removeAttribute("playsinline");
                     else video.setAttribute("playsinline", previousInline);
                 }
-                if (viewportMeta?.content === "width=device-width, initial-scale=1, viewport-fit=cover") {
-                    if (createdViewport) viewportMeta.remove();
-                    else if (previousViewport == null) viewportMeta.removeAttribute("content");
-                    else viewportMeta.setAttribute("content", previousViewport);
-                }
+                if (legacy && !document.querySelector('.tm115-legacy video')) resetMobileViewport();
             }
         };
     }
@@ -876,6 +1526,11 @@
             const root = legacy || modern;
             if (root) players.set(video, enhancePlayer(video, root, Boolean(legacy)));
         }
+        for (const player of players.values()) {
+            player.root.classList.toggle("tm115-player-mobile", isMobileContext() && isCompactViewport());
+            if (!isMobileDevice()) player.root.classList.remove("tm115-controls-hidden");
+        }
+        fullscreenOrientation?.sync();
     }
 
     const playlists = new Map();
@@ -935,6 +1590,23 @@
         }
         document.addEventListener("fullscreenchange", layout, { signal: abort.signal });
 
+        function getPlaybackURL(code, name, fid) {
+            // 重新构造播放地址，避免沿用旧 fid 等参数而跳回上一视频或产生 404。
+            const url = new URL(legacy ? "/" : `/players/video/${encodeURIComponent(code)}`, location.origin);
+            if (legacy) {
+                if (!/(^|\.)115vod\.com$/.test(location.hostname)) url.searchParams.set("ct", "play");
+                url.searchParams.set("pickcode", code);
+                url.searchParams.set("hls", "1");
+            } else {
+                url.searchParams.set("name", name);
+                if (fid) url.searchParams.set("fid", String(fid));
+            }
+            for (const key of ["sort_field", "sort_asc", "share_id"]) {
+                if (pageURL.searchParams.has(key)) url.searchParams.set(key, pageURL.searchParams.get(key));
+            }
+            return url;
+        }
+
         function addFile(file) {
             const code = String(file.pc || "");
             if (!/^[a-z0-9]+$/i.test(code) || files.has(code)) return;
@@ -952,20 +1624,7 @@
             if (current) button.setAttribute("aria-current", "true");
             button.addEventListener("click", () => {
                 if (current) return;
-                // 重新构造播放地址，避免沿用旧 fid 等参数而跳回上一视频或产生 404。
-                const url = new URL(legacy ? "/" : `/players/video/${encodeURIComponent(code)}`, location.origin);
-                if (legacy) {
-                    if (!/(^|\.)115vod\.com$/.test(location.hostname)) url.searchParams.set("ct", "play");
-                    url.searchParams.set("pickcode", code);
-                    url.searchParams.set("hls", "1");
-                } else {
-                    url.searchParams.set("name", name);
-                    if (file.fid) url.searchParams.set("fid", String(file.fid));
-                }
-                for (const key of ["sort_field", "sort_asc", "share_id"]) {
-                    if (pageURL.searchParams.has(key)) url.searchParams.set(key, pageURL.searchParams.get(key));
-                }
-                location.assign(url.href);
+                location.assign(getPlaybackURL(code, name, file.fid).href);
             }, { signal: abort.signal });
             episodes.append(button);
         }
@@ -1080,24 +1739,46 @@
     }
 
     function refresh() {
+        refreshMobile();
         refreshAds();
-        refreshList();
         refreshPlayers();
         refreshPlaylists();
     }
 
-    // 115 会异步重建列表和播放器，使用 RAF 合并同一帧内的多次 DOM 变化。
-    let queued = false;
-    new MutationObserver(records => {
-        if (records.every(record => record.target instanceof Element &&
-            record.target.closest(".tm115-playlist"))) return;
-        if (queued) return;
-        queued = true;
-        requestAnimationFrame(() => {
-            queued = false;
-            refresh();
+    function shouldRefresh(records) {
+        return records.some(record => {
+            if (record.type !== "attributes") return !(record.target instanceof Element && record.target.closest(".tm115-playlist"));
+            if (!isMobileContext()) return false;
+            if (record.target === navigation) return true;
+            const previous = record.oldValue?.split(/\s+/) || [];
+            return ["tm115-navigation", "tm115-nav-toggle", "tm115-content", "tm115-player-mobile", "tm115-old-entry",
+                "tm115-account", "tm115-account-trigger", "tm115-account-menu"]
+                .some(name => previous.includes(name) && !record.target.classList.contains(name));
         });
-    }).observe(document.documentElement, { childList: true, subtree: true });
-    window.addEventListener("popstate", refresh);
+    }
+
+    function observePage() {
+        // 115 会异步重建列表和播放器，使用 RAF 合并同一帧内的多次 DOM 变化。
+        let queued = false;
+        new MutationObserver(records => {
+            if (!shouldRefresh(records) || queued) return;
+            queued = true;
+            requestAnimationFrame(() => {
+                queued = false;
+                refresh();
+            });
+        }).observe(document.documentElement, {
+            childList: true, subtree: true,
+            // 只响应站点覆盖适配标记；忽略 hover、选中和脚本自己的 class 写入。
+            ...(mobileEnabled ? { attributes: true, attributeFilter: ["class", "style"], attributeOldValue: true } : {}),
+        });
+        window.addEventListener("popstate", refresh);
+    }
+
+    registerSettingsMenu();
+    initMobile();
+    initListMenus();
+    fullscreenOrientation = initFullscreenOrientation();
+    observePage();
     refresh();
 })();
