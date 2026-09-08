@@ -11,7 +11,10 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
+// @grant        GM_xmlhttpRequest
 // @grant        unsafeWindow
+// @connect      proapi.115.com
+// @connect      webapi.115.com
 // @license      MIT
 // ==/UserScript==
 
@@ -99,6 +102,7 @@
         player: { key: "tm115-player-enabled", label: "播放器优化" },
         playlist: { key: "tm115-playlist-enabled", label: "播放器显示视频列表" },
         ads: { key: "tm115-ads-enabled", label: "去除广告" },
+        download: { key: "tm115-download-enabled", label: "大文件浏览器下载", defaultValue: true },
         holdRate: {
             key: "tm115-hold-rate",
             label: "长按快进倍数（1-8 倍）",
@@ -1006,6 +1010,262 @@
         });
     }
 
+    function downloadCodec(input, seed, decode = false) {
+        // 接口协议常量：1024 位 RSA 公钥（e = 65537）和 XOR 密钥表，不依赖外部加密库。
+        const n = 0x8686980c0f5a24c4b9d43020cd2c22703ff3f450756529058b1cf88f09b8602136477198a6e2683149659bd122c33592fdb5ad47944ad1ea4d36c6b172aad6338c3bb6ac6227502d010993ac967d1aef00f0c8e038de2e4d3bc2ec368af2e9f10a6f1eda4f7262f136420c07c331b871bf139f74f3010e3c4fe57df3afb71683n;
+        const table = "f0e569aebfdcbf8a1a45e8be7da673b8de8fe7c445da86c49b648b146ab4f1aa3801359e26692c86006b4fa5363462a62a966818f24afdbd6b978f4d8f8913b76c8e93ed0e0d483ed72f88d8fefe7e8650954fd1eb832634db667b9c7e9d7a8132eab633de3aa95934663baaba816048b9d5819cf86c8477ff5478265fbee81e369f34805c452c9b76d51b8fccc3b8f5";
+        function mask(bytes, salt, size) {
+            const key = [];
+            for (let i = 0; i < size; i++) {
+                const a = parseInt(table.slice(size * i * 2, size * i * 2 + 2), 16);
+                const b = parseInt(table.slice(size * (size - 1 - i) * 2, size * (size - 1 - i) * 2 + 2), 16);
+                key.push(((salt[i] + a) % 256) ^ b);
+            }
+            // 前 length % 4 字节独立处理，后续从密钥起点重新循环。
+            const prefix = bytes.length % 4;
+            for (let i = 0; i < bytes.length; i++) bytes[i] ^= key[i < prefix ? i : (i - prefix) % size];
+            return bytes;
+        }
+        function rsa(block) {
+            let number = 0n;
+            for (let i = 0; i < 128; i++) number = number * 256n + BigInt(block[i]);
+            if (number >= n) throw new Error("下载接口加密数据无效");
+            let power = number;
+            for (let i = 0; i < 16; i++) power = power * power % n;
+            power = power * number % n;
+            const result = new Uint8Array(128);
+            for (let i = 127; i >= 0; i--) { result[i] = Number(power % 256n); power /= 256n; }
+            return result;
+        }
+        if (!decode) {
+            const bytes = mask(new TextEncoder().encode(input), seed, 4).reverse();
+            const fixed = [120, 6, 173, 76, 51, 134, 93, 24, 76, 1, 63, 70];
+            for (let i = 0; i < bytes.length; i++) bytes[i] ^= fixed[i < bytes.length % 4 ? i : (i - bytes.length % 4) % 12];
+            // 单文件 pickcode 请求小于 RSA 单块容量，不实现无用的批量编码。
+            if (seed.length !== 16 || bytes.length + 16 > 117) throw new Error("下载标识过长");
+            const block = crypto.getRandomValues(new Uint8Array(128));
+            const separator = 111 - bytes.length;
+            for (let i = 2; i < separator; i++) while (!block[i]) crypto.getRandomValues(block.subarray(i, i + 1));
+            block[0] = 0; block[1] = 2; block[separator] = 0;
+            block.set(seed, separator + 1);
+            block.set(bytes, separator + 17);
+            return btoa(String.fromCharCode(...rsa(block)));
+        }
+        try {
+            const encrypted = Uint8Array.from(atob(input), char => char.charCodeAt(0));
+            if (!encrypted.length || encrypted.length % 128 || encrypted.length > 65536) throw new Error();
+            const payload = [];
+            for (let offset = 0; offset < encrypted.length; offset += 128) {
+                const block = rsa(encrypted.subarray(offset, offset + 128));
+                const end = block.indexOf(0, 2);
+                if (block[0] || end < 10) throw new Error();
+                for (let i = end + 1; i < 128; i++) payload.push(block[i]);
+            }
+            if (payload.length < 16) throw new Error();
+            const bytes = mask(Uint8Array.from(payload.slice(16)), payload, 12).reverse();
+            return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(mask(bytes, seed, 4)));
+        } catch { throw new Error("下载接口数据解码失败"); }
+    }
+
+    function requestDownloadAPI(url, data) {
+        return new Promise((resolve, reject) => {
+            if (typeof GM_xmlhttpRequest !== "function") return reject(new Error("请更新安装脚本并允许下载接口的跨域请求"));
+            GM_xmlhttpRequest({
+                method: data ? "POST" : "GET", url, data, timeout: 20000,
+                headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": navigator.userAgent },
+                onload(response) {
+                    if (response.status < 200 || response.status >= 300) return reject(new Error("下载接口请求失败，请检查登录和网络"));
+                    let result;
+                    try { result = JSON.parse(response.responseText); }
+                    catch { return reject(new Error("下载接口返回异常，请重新登录后重试")); }
+                    if (result?.state === true || result?.state === 1) return resolve(result.data);
+                    const code = String(result?.errno ?? result?.errcode ?? result?.code ?? "");
+                    reject(new Error(code === "911" ? "请先在 115 网页完成账号验证，再重试下载" :
+                        `取下载地址失败，请检查登录状态和文件权限${/^\d+$/.test(code) ? `（${code}）` : ""}`));
+                },
+                onerror: () => reject(new Error("下载接口网络请求失败")),
+                ontimeout: () => reject(new Error("下载接口请求超时")),
+            });
+        });
+    }
+
+    async function downloadFiles(targets, nativeDownload) {
+        let handedOff = 0;
+        let cancelled = false;
+        const cancel = () => { cancelled = true; };
+        window.addEventListener("pagehide", cancel, { once: true });
+        try {
+            const filesToDownload = [];
+            const seen = new Set();
+            // 先检查整批目标，避免先下载文件、遇到文件夹后又把整批交回原生处理。
+            for (const target of targets) {
+                if (cancelled) return;
+                if (!getValue("tm115-download-enabled", true)) throw new Error("下载开关已关闭，已停止后续取链");
+                const id = String(target.id || "");
+                let pickcode = target.pickcode;
+                const key = id ? `id:${id}` : `pc:${pickcode}`;
+                if (seen.has(key)) continue;
+                seen.add(key);
+                if (id) {
+                    if (!/^\d+$/.test(id)) throw new Error("文件标识无效");
+                    const data = await requestDownloadAPI(`https://webapi.115.com/files/get_info?file_id=${id}`);
+                    if (cancelled) return;
+                    const info = Array.isArray(data) && data.find(file => String(file.fid || file.cid) === id);
+                    if (!info) throw new Error("找不到该文件");
+                    if (!info.fid) { nativeDownload(); return; }
+                    if (info.aid != null && Number(info.aid) !== 1) throw new Error("只支持当前网盘中的普通文件");
+                    pickcode = info.pc;
+                }
+                if (!/^[a-z0-9]{1,64}$/i.test(pickcode || "")) throw new Error("文件缺少下载标识");
+                filesToDownload.push({ id, pickcode });
+                if (targets.length > 1) await new Promise(resolve => setTimeout(resolve, 500));
+            }
+            if (!filesToDownload.length) throw new Error("请选择需要下载的文件");
+            const ua = navigator.userAgent;
+            for (const { id, pickcode } of filesToDownload) {
+                if (cancelled) return;
+                if (!getValue("tm115-download-enabled", true)) throw new Error("下载开关已关闭，已停止后续取链");
+                const seed = crypto.getRandomValues(new Uint8Array(16));
+                const encrypted = await requestDownloadAPI("https://proapi.115.com/app/chrome/downurl",
+                    new URLSearchParams({ data: downloadCodec(JSON.stringify({ pickcode }), seed) }).toString());
+                if (cancelled) return;
+                if (!getValue("tm115-download-enabled", true)) throw new Error("下载开关已关闭，已停止后续下载");
+                const files = downloadCodec(encrypted, seed, true);
+                const file = id ? files?.[id] : Object.values(files || {}).find(item => item?.pick_code === pickcode);
+                if (!file?.url?.url) throw new Error("该文件没有可用的下载地址");
+                let url;
+                try { url = new URL(file.url.url); } catch { throw new Error("下载地址无效"); }
+                if (url.protocol !== "https:" || url.username || url.password) throw new Error("下载地址不符合安全要求");
+                if (url.searchParams.get("f") === "3") throw new Error("该地址需要额外凭据，请关闭此开关使用原生下载");
+                if (navigator.userAgent !== ua) throw new Error("浏览器 UA 已改变，请重新点击下载");
+                // 新版 CSP 禁止下载 iframe；串行取链，实际传输仍由浏览器负责。
+                const link = document.createElement("a");
+                link.hidden = true;
+                link.href = url.href;
+                link.download = file.file_name || "";
+                document.body.append(link);
+                try { link.click(); } finally { link.remove(); }
+                handedOff++;
+                if (handedOff < filesToDownload.length) await new Promise(resolve => setTimeout(resolve, 500));
+            }
+        } catch (error) {
+            if (!cancelled) Dialog.alert("大文件浏览器下载", `${error.message || "下载失败"}${handedOff ? `。此前已向浏览器提交 ${handedOff} 个文件，请检查下载列表后再重试其余文件。` : ""}`, "error", "知道了");
+        } finally {
+            window.removeEventListener("pagehide", cancel);
+        }
+    }
+
+    function initBrowserDownloads() {
+        if (!values.download) return;
+        const hooks = [];
+        const rowSelector = '.file-list-item[data-file-id], .file-grid-item[data-file-id]';
+        const menuSelector = '.context-menu, [role="menu"], div.fixed[class~="z-[10000]"]:has(button.w-full.text-left)';
+        const batchSelector = '.absolute.top-0.left-0.right-0.bg-white.z-10';
+        let menuOwner;
+        let nativeClick = false;
+        function selectedFiles(toolbar) {
+            if (!toolbar?.isConnected) throw new Error("无法确认批量下载所属列表，请重新选择文件");
+            const labels = toolbar.querySelectorAll(':scope > div > div:first-child > div > span.text-sm.whitespace-nowrap');
+            const match = labels.length === 1 && labels[0].textContent.trim().match(/^(?:已选中\s*(\d+)\s*项|(\d+)\s+selected)$/i);
+            const count = match && +(match[1] || match[2]);
+            if (!count) throw new Error("无法读取完整选择数量，未开始下载，请从文件行下载");
+            let scope = toolbar.parentElement;
+            while (scope && !scope.querySelector(rowSelector)) scope = scope.parentElement;
+            if (!scope || scope === document.body || scope === document.documentElement) throw new Error("无法确认文件列表，未开始下载");
+            if (scope.querySelectorAll(batchSelector).length !== 1) throw new Error("存在多个选择工具栏，无法确认下载目标");
+            const ids = new Set([...scope.querySelectorAll(rowSelector)]
+                .filter(row => row.querySelector('input[type="checkbox"]:checked')).map(row => row.dataset.fileId));
+            if (ids.size !== count || [...ids].some(id => !/^\d+$/.test(id))) {
+                throw new Error("部分已选项目未显示，无法完整读取选择，未开始下载。请减少选择数量或关闭此开关使用原生下载。");
+            }
+            return [...ids].sort().map(id => ({ id }));
+        }
+        function hookLegacy() {
+            const pageWindow = typeof unsafeWindow === "undefined" ? window : unsafeWindow;
+            const api = pageWindow.Core?.FileAPI;
+            if (!api) return;
+            for (const name of ["DownloadSomeFile", "Download"]) {
+                const original = api[name];
+                if (typeof original !== "function" || original.tm115BrowserDownload) continue;
+                const wrapper = function (files, ...args) {
+                    const fallback = () => {
+                        nativeClick = true;
+                        try { return original.call(this, files, ...args); } finally { nativeClick = false; }
+                    };
+                    if (nativeClick || !getValue("tm115-download-enabled", true) || new URL(location.href).searchParams.has("share_id")) return original.call(this, files, ...args);
+                    const rows = name === "DownloadSomeFile" ? Array.from(files || [], item => item?.nodeType === 1 ? item : item?.[0]) : [];
+                    if (name === "DownloadSomeFile" && (!rows.length || rows.some(row => row?.getAttribute("file_type") !== "1"))) return fallback();
+                    const targets = name === "Download" ? [{ pickcode: files }] : rows.map(row => ({ id: row.getAttribute("file_id") }));
+                    downloadFiles(targets, () => {
+                        if (rows.some((row, i) => !row.isConnected || row.getAttribute("file_id") !== targets[i].id)) throw new Error("文件列表已变化，请重新点击下载");
+                        return fallback();
+                    });
+                    return false;
+                };
+                wrapper.tm115BrowserDownload = true;
+                api[name] = wrapper;
+                hooks.push({ api, name, original, wrapper });
+            }
+        }
+        // 旧版入口直接接收原生选择，避免猜测 iframe 和右键菜单的所属文件。
+        window.addEventListener("pagehide", () => {
+            for (const { api, name, original, wrapper } of hooks) if (api[name] === wrapper) api[name] = original;
+            hooks.length = 0;
+            menuOwner = null;
+        });
+        window.addEventListener("pageshow", hookLegacy);
+        window.addEventListener("load", hookLegacy, true);
+        const remember = event => {
+            if (event.target.closest?.(`${menuSelector}, [data-batch-more-menu="true"]`)) return;
+            const row = event.target.closest?.(rowSelector);
+            menuOwner = row ? { row, id: row.dataset.fileId } : { batch: event.target.closest?.(batchSelector) };
+        };
+        document.addEventListener("contextmenu", remember, true);
+        document.addEventListener("pointerdown", remember, true);
+        window.addEventListener("click", event => {
+            hookLegacy();
+            if (nativeClick || !getValue("tm115-download-enabled", true) || location.hostname !== "115.com" ||
+                !/^\/(storage|search|players\/video)(\/|$)/.test(location.pathname) || new URL(location.href).searchParams.has("share_id")) return;
+            const button = event.target.closest?.('button, a, [role="menuitem"]');
+            const action = event.target.closest?.('[data-menu-action="download"]');
+            if (!action && !/^(下载|下载文件|下载原文件|Download)$/i.test((button?.getAttribute("aria-label") || button?.textContent || "").trim())) return;
+            const batchMenu = button?.closest('[data-batch-more-menu="true"]');
+            const batch = button?.closest(batchSelector) || (batchMenu && menuOwner?.batch);
+            if (batch || batchMenu) {
+                event.preventDefault();
+                event.stopImmediatePropagation();
+                try {
+                    const targets = selectedFiles(batch);
+                    const page = location.href;
+                    downloadFiles(targets, () => {
+                        // 文件夹回退前重新核对，不能对用户后来改变的选择重放旧点击。
+                        if (!button.isConnected || location.href !== page || JSON.stringify(selectedFiles(batch)) !== JSON.stringify(targets)) {
+                            throw new Error("选择已变化，请重新点击下载");
+                        }
+                        nativeClick = true;
+                        try { button.click(); } finally { nativeClick = false; }
+                    });
+                } catch (error) { Dialog.alert("大文件浏览器下载", error.message, "warning", "知道了"); }
+                return;
+            }
+            let row = event.target.closest?.(rowSelector);
+            const menu = button?.closest(menuSelector);
+            const player = location.pathname.match(/^\/players\/video\/([a-z0-9]+)\/?$/i);
+            if (!row && menu && menuOwner?.row?.isConnected && menuOwner.row.dataset.fileId === menuOwner.id) row = menuOwner.row;
+            // 文件行和右键菜单仍下载该行，不扩大为当前全部选择。
+            if (!row && !player) return;
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            const id = row?.dataset.fileId;
+            downloadFiles([row ? { id } : { pickcode: player[1] }], () => {
+                if (!button?.isConnected || (row && row.dataset.fileId !== id)) return;
+                nativeClick = true;
+                try { button.click(); } finally { nativeClick = false; }
+            });
+        }, true);
+        hookLegacy();
+    }
+
     function isOutsideGestureArea(x, y, rect) {
         return x < rect.left + 24 || x > rect.right - 56 || y < rect.top + 56 || y > rect.bottom - 80;
     }
@@ -1831,6 +2091,7 @@
     }
 
     registerSettingsMenu();
+    initBrowserDownloads();
     initMobile();
     initListMenus();
     fullscreenOrientation = initFullscreenOrientation();
